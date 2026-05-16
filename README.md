@@ -12,8 +12,9 @@ Clarivate CompuMark MCP connector.
   - Returns the full workflow and output rules that were previously stored in
     plugin skill files.
 - `build_trademark_knockout_execution_plan`
-  - Normalizes mark, jurisdiction, Nice class, match scope, and web-search
-    preference into a concrete plan for the CompuMark MCP tools.
+  - Normalizes mark, jurisdiction, Nice class, match scope, and online-presence
+    default into a concrete plan for the CompuMark MCP tools and a goal-oriented
+    web-search brief.
 - `get_trademark_knockout_report_template`
   - Returns the required report structure.
 - `validate_trademark_knockout_report`
@@ -55,6 +56,9 @@ python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-
    - litigation/caselaw search.
 5. Run the online-presence check by default using ChatGPT's or Claude's own
    browsing/web-search capability. Skip it only if the user explicitly opts out.
+   Choose relevant searches dynamically from the mark, territories, classes,
+   goods/services context, and discovered results; do not follow fixed query
+   patterns from the MCP plan.
 6. Draft the report with `get_trademark_knockout_report_template`.
 7. Call `validate_trademark_knockout_report`.
 8. Call `generate_clarivate_report_pdf`.

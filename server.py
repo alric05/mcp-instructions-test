@@ -562,14 +562,6 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    online_queries = []
-    if web_enabled:
-        online_queries = [
-            f'"{mark}"',
-            f'"{mark}" ("app" OR "software" OR "SaaS" OR "API" OR "extension" OR "plugin" OR "platform")',
-            f'"{mark}" (Amazon OR Walmart)',
-        ]
-
     return {
         "planned_steps_block": [
             "Get search criteria",
@@ -653,9 +645,16 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "online_presence": {
             "enabled": web_enabled,
             "default_behavior": "enabled unless the user explicitly opts out",
-            "queries": online_queries,
+            "search_guidance": (
+                "Use ChatGPT's or Claude's own browsing/web-search judgment to find relevant online uses of the exact proposed mark "
+                "and materially similar signs. Focus on source-backed commercial use, domains, products, apps/software, marketplaces, "
+                "social or company profiles, and other branding uses that may affect marketplace risk. Adapt searches to the mark, "
+                "territories, classes, goods/services context, and discovered results; do not follow fixed query patterns."
+                if web_enabled
+                else "Online presence search skipped because the user opted out."
+            ),
             "note": (
-                "Run these with ChatGPT's or Claude's own browsing/web-search capability."
+                "Do not return or rely on fixed query strings from this execution plan; choose relevant searches dynamically."
                 if web_enabled
                 else "Online presence search skipped because the user opted out."
             ),
