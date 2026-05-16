@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""MCP server for trademark knockout report validation and PDF rendering.
+"""Standalone MCP server for trademark knockout report workflows.
 
-ChatGPT remains the workflow engine. This server intentionally does not search
-trademark data, search litigation data, perform web research, select conflicts,
-or write the legal narrative. It only exposes read-only workflow/template
-references plus two quality-control tools:
-
-- validate_knockout_report
-- render_clarivate_knockout_pdf
+This server intentionally does not depend on Codex plugin skills. It exposes the
+workflow guidance and deterministic Clarivate-template PDF generation as MCP
+tools, while live trademark and litigation data should still come from the
+existing Clarivate CompuMark MCP connector.
 """
 
 from __future__ import annotations
@@ -20,8 +17,8 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
-from urllib.parse import quote, urlparse
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 try:
     from pypdf import PdfReader, PdfWriter
@@ -33,14 +30,14 @@ try:
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfgen import canvas
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-except ImportError:  # pragma: no cover - runtime dependency guard
+except ImportError:  # pragma: no cover - startup guard for MCP runtime
     PdfReader = PdfWriter = None  # type: ignore[assignment]
     colors = TA_LEFT = A4 = ParagraphStyle = getSampleStyleSheet = mm = None  # type: ignore[assignment]
     pdfmetrics = canvas = Paragraph = SimpleDocTemplate = Spacer = Table = TableStyle = None  # type: ignore[assignment]
 
 
-SERVER_NAME = "trademark-knockout-report-renderer"
-SERVER_VERSION = "1.0.0"
+SERVER_NAME = "trademark-knockout-report-workflow"
+SERVER_VERSION = "0.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_TEMPLATE_PATH = BASE_DIR / "assets" / "Clarivate_template.pdf"
 
@@ -56,77 +53,196 @@ SUBTITLE_FONT = "Carlito Bold"
 SUBTITLE_FONT_FALLBACK = "Helvetica-Bold"
 SUBTITLE_FONT_SIZE = 22
 
-RISK_LABELS = {"🟢 Low", "🟠 Medium", "🔴 High"}
-RISK_TOKEN_RE = re.compile(r"[🟢🟠🔴]\s*[A-Za-z]+")
 LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
 PIPE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
-PLACEHOLDER_RE = re.compile(
-    r"\[(?=[^\]]*(?:"
-    r"MARK|DATE|ROW|FIELD|DETAILS|NUMBER|APPROX|LIST|VERBAL ELEMENT|STATUS|OFFICE|"
-    r"CLASS|OWNER|FULL_TEXT_URL|PARTY|COUNTRY|REGION|SUMMARY|NAME|WEBPAGE_URL|TYPE|"
-    r"NOTES|RESULT|ITEM|ANY LIMITATIONS|WHY IT MATTERS|COMMENT|STATE WHETHER|"
-    r"KEY TAKEAWAY|WORD\s*/\s*LOGO|EU\s*/\s*UK|EXACT ONLY|🟢|🟠|🔴"
-    r"))[^\]]+\]",
-    re.IGNORECASE,
-)
+RISK_LABELS = {"🟢 Low", "🟠 Medium", "🔴 High"}
+SUPPORTED_RISK_LABELS = RISK_LABELS | {
+    "🟢 Bajo",
+    "🟠 Medio",
+    "🔴 Alto",
+}
 
-WORKFLOW_CONTRACT = """# Trademark Knockout Report Workflow Contract
+EU_COUNTRY_OFFICES = {
+    "AT",
+    "BE",
+    "BG",
+    "HR",
+    "CY",
+    "CZ",
+    "DK",
+    "EE",
+    "FI",
+    "FR",
+    "DE",
+    "GR",
+    "HU",
+    "IE",
+    "IT",
+    "LV",
+    "LT",
+    "LU",
+    "MT",
+    "NL",
+    "PL",
+    "PT",
+    "RO",
+    "SK",
+    "SI",
+    "ES",
+    "SE",
+}
 
-ChatGPT is the workflow engine. The local report MCP server is only an artifact
-and quality-control server.
+OFFICE_ALIASES = {
+    "EU": "EM",
+    "EUTM": "EM",
+    "EUIPO": "EM",
+    "EUROPEAN UNION": "EM",
+    "EUROPEAN UNION INTELLECTUAL PROPERTY OFFICE": "EM",
+    "UK": "GB",
+    "UNITED KINGDOM": "GB",
+    "GREAT BRITAIN": "GB",
+    "BRITAIN": "GB",
+    "US": "US",
+    "USA": "US",
+    "UNITED STATES": "US",
+    "UNITED STATES OF AMERICA": "US",
+    "WIPO": "WO",
+    "WO": "WO",
+    "MADRID": "WO",
+    "INTERNATIONAL": "WO",
+    "FRANCE": "FR",
+    "SPAIN": "ES",
+    "GERMANY": "DE",
+    "ITALY": "IT",
+    "CANADA": "CA",
+    "AUSTRALIA": "AU",
+    "CHINA": "CN",
+    "JAPAN": "JP",
+    "INDIA": "IN",
+    "BRAZIL": "BR",
+    "MEXICO": "MX",
+}
 
-## Required sequence
+WORKFLOW_INSTRUCTIONS = """# Trademark Knockout Workflow Instructions
 
-1. Get search criteria.
-2. Conduct trademark searches, litigation searches & optional web search.
-3. Analyze trademark risk.
-4. Draft report.
-5. Generate final PDF.
+Use these instructions instead of Codex plugin skills. Live trademark and
+litigation data must come from the connected Clarivate CompuMark MCP tools.
 
-## Tool boundaries
+## Required visible behavior
 
-| Component | Role |
-|---|---|
-| Existing Clarivate / CompuMark MCP | Trademark search, trademark details, litigation data. |
-| ChatGPT web search | Optional online-presence search when the user agrees. |
-| Local report MCP | Report validation and Clarivate-style PDF rendering only. |
+1. Detect the user's language from the prompt and use it for visible headings,
+   labels, table headers, status values, summaries, and final report text. Do
+   not translate tool names, IDs, URLs, registration numbers, or mark verbal
+   elements from source records.
+2. Display a localized **Planned Steps** block exactly once before Step 1:
+   1. Get search criteria
+   2. Conduct trademark searches, litigation searches & online-presence search
+   3. Analyze trademark risk
+   4. Draft report
+   5. Generate final PDF
+3. Ask only for missing required inputs, one at a time: mark name, jurisdiction
+   or registration office, and Nice class. Do not ask for online-presence
+   preference unless the user explicitly raises it.
+4. Use only the mark wording provided by the user. Do not add unrequested
+   variations. Use exact matching unless the user explicitly asks for containing
+   matches.
+5. Query trademark data through both routes: identical knockout search and
+   custom/screening trademark search.
+6. Query litigation with the Clarivate litigation-search MCP tool.
+7. Run online-presence search by default using ChatGPT's or Claude's own
+   browsing/web-search capability. Skip it only if the user explicitly opts out.
+8. Draft the report with the exact report structure returned by
+   get_trademark_knockout_report_template. Top 5 tables must contain exactly
+   five rows; use a localized equivalent of "No further material source-backed
+   finding" for empty rows.
+9. Generate the final PDF only with generate_clarivate_report_pdf. Do not create
+   a ChatGPT/native PDF artifact, do not export markdown to PDF yourself, and do
+   not link to a chatgpt.com conversation anchor as the report PDF.
+10. In the final response, the "Download the report" link must be the pdf_url
+   returned by generate_clarivate_report_pdf. The URL must be an HTTPS /reports/
+   URL from this MCP server, for example
+   https://example.onrender.com/reports/report_name.pdf. If pdf_url is null or
+   missing, state that the PDF was generated inside the server but no public
+   download URL is configured. Do not fetch, open, download, inspect, or review
+   the pdf_url; return the link to the user as-is.
 
-Do not use this local MCP server to run the workflow, perform web research,
-analyze risk, select conflicts, decide broadening stages, or draft legal
-narrative.
+## Step summary behavior
 
-## Intake gate
+After Steps 1, 2, 3, and 4, display exactly this localized three-bullet block:
 
-Required minimum inputs are mark name, jurisdiction or registration office,
-Nice class, and online-presence search preference. Ask only for missing required
-information. Do not require optional matter details.
+**Step X Summary**
+- **Completed:** ...
+- **Key findings:** ...
+- **Next:** ...
 
-## Trademark data collection
+After Step 5, before the report, display a markdown blockquote:
 
-Route A must use the identical knockout search. Route B must use staged custom
-screening: B1 exact word specification contains the searched term with no class
-filter; B2 word mark specification contains the searched term plus class filter
-with phonetics false; B3 keeps class filtering and turns phonetics true only if
-B2 is zero. Merge Route A and B IDs, de-duplicate, and retrieve details in
-batches of no more than 100 IDs.
+> **Final Summary Before Report**
+> - **Overall risk view:** exactly one of 🟢 Low / 🟠 Medium / 🔴 High
+> - **Top conflicts:** concise source-backed list or none identified
+> - **Deliverable status:** Report text complete; PDF URL returned: [filename or URL].
 
-## Litigation data collection
+If the PDF tool does not return a pdf_url, state that no public download URL is
+available.
+If the only available link is a chatgpt.com/c conversation link, that is not the
+generated report PDF and must be treated as a failed public-download handoff.
 
-Use search-litigation-cases for opposition signals. Always include
-FIRST_ACTION_TYPE EQ OPPOSITION. When party-name filters are used, also include
-PARTY_IS_EX_OFFICIO EQ false. Use AND-only queries and order_by as a dictionary.
+## Data collection rules
 
-## Online presence
+- Use broad default settings unless the user asks otherwise: active_only false,
+  plurals true, phonetics false for narrow stages, cross-references true, and
+  supported regional phonetics true when controlled broadening calls for it.
+- If a specific country is specified, include that office and WO with
+  limitWOresultsToDesignated true.
+- If an EU country is specified, include that office, EM, and WO with
+  limitWOresultsToDesignated true.
+- If the EU/EUIPO is specified, include EM and WO with
+  limitWOresultsToDesignated true.
+- Never query details for more than 100 trademark IDs per content call.
+- Merge IDs from both trademark routes, de-duplicate, keep per-route counts, and
+  record route-specific errors.
 
-Only perform ChatGPT web search when the user opts in. Do not use a web-search
-MCP server. If the user opts out, keep Section 3 and state that online presence
-search was not performed at the user's request.
+## Route A: identical knockout search
 
-## Risk and report gates
+Call the CompuMark identical knockout search tool with the proposed mark,
+registration office scope, Nice classes, and WO-designation flag.
 
-Use exactly one overall risk label: 🟢 Low, 🟠 Medium, or 🔴 High. Keep the
-required report structure, keep every Top 5 table to exactly five rows, do not
-invent source facts, and validate the final Markdown before rendering the PDF.
+## Route B: custom/screening trademark search
+
+Run a progressive sequence and stop as soon as the result set is useful:
+
+- B1: EXACT_WORD_MARK_SPECIFICATION CONTAINS searched mark. Do not add class
+  filtering. If results are found, use this as the primary exact-match set.
+- B2: if B1 is zero, WORD_MARK_SPECIFICATION CONTAINS searched mark AND
+  INT_CLASS_NUMBER EQUALS requested class. Start with phonetics false.
+- B3: if B2 is zero, keep the class filter and set phonetics true.
+
+Stop broadening when any stage returns 5 to 100 results. If a stage returns more
+than 100 results, do not run broader stages; trim by relevance during analysis.
+
+## Litigation rules
+
+- Always include FIRST_ACTION_TYPE EQ OPPOSITION.
+- Prefer CASE_DOMAIN EQ TRADEMARK when available.
+- Avoid OR conditions; split into separate AND-only calls.
+- order_by is a dictionary/map, for example {"FIRST_ACTION_DATE": "DESC"}.
+- For owner searches, use the most distinctive owner-name fragment with
+  PARTY_OPTIMIZED_NAME LIKE %FRAGMENT%, PARTY_ROLE EQ PLAINTIFF, and
+  PARTY_IS_EX_OFFICIO EQ false.
+- For mark searches, query TRADEMARK_VERBAL_ELEMENT for the most relevant found
+  names.
+
+## Analysis rules
+
+Assess overall clearance risk as exactly one of 🟢 Low, 🟠 Medium, or 🔴 High.
+Consider exact/similar matches, class fit, jurisdiction fit, active status,
+litigation, online commercial use, known reputation, and possible non-use risk
+for records older than five years where no active use is visible.
+
+Never invent registration numbers, owners, cases, dates, URLs, or legal
+conclusions. If a URL is unavailable, use a localized equivalent of "link
+unavailable". For visible web and trademark links, display the domain as link
+text and embed the full absolute URL.
 """
 
 REPORT_TEMPLATE = """# AI Generated Trademark Knockout Search Report (Demo only)
@@ -138,13 +254,13 @@ Date of report: [DATE]
 
 ## 1. Search Criteria
 
-| Field | Details |
-|---|---|
-| Mark searched | [MARK] |
-| Type | [Word / Logo / Both] |
-| Territories covered | [EU / UK / US / WIPO designations / Other] |
-| Nice classes | [CLASS NUMBERS] |
-| Match scope | [Exact only / Contains / Phonetic / Plurals] |
+| Field               | Details                                       |
+| ------------------- | --------------------------------------------- |
+| Mark searched       | [MARK]                                        |
+| Type                | [Word / Logo / Both]                          |
+| Territories covered | [EU / UK / US / WIPO designations / Other]    |
+| Nice classes        | [CLASS NUMBERS, if known]                     |
+| Match scope         | [Exact only / Contains / Phonetic / Plurals]  |
 | Notes / assumptions | [Any limitations, exclusions, or assumptions] |
 
 ---
@@ -153,37 +269,37 @@ Date of report: [DATE]
 
 ### 2.1 Summary
 
-| Item | Result |
-|---|---|
-| Total records reviewed | [NUMBER / APPROX.] |
-| Most relevant jurisdictions | [LIST] |
-| Most relevant classes | [LIST] |
+| Item                            | Result                |
+| ------------------------------- | --------------------- |
+| Total records reviewed          | [NUMBER / APPROX.]    |
+| Most relevant jurisdictions     | [LIST]                |
+| Most relevant classes           | [LIST]                |
 | Overall initial risk impression | [🟢 Low / 🟠 Medium / 🔴 High] |
 
 ### 2.2 Most Relevant Trademark References (Top 5)
 
-| Verbal Element | Status | Registration Office | Class(es) | Number | Date | Owner | Full Text URL |
-|---|---|---|---|---|---|---|---|
-| [ROW 1] |  |  |  |  |  |  |  |
-| [ROW 2] |  |  |  |  |  |  |  |
-| [ROW 3] |  |  |  |  |  |  |  |
-| [ROW 4] |  |  |  |  |  |  |  |
-| [ROW 5] |  |  |  |  |  |  |  |
+| Verbal Element     | Status   | Registration Office | Class(es) | Number   | Date   | Owner   | Full Text URL   |
+| ------------------ | -------- | ------------------- | --------- | -------- | ------ | ------- | --------------- |
+| [VERBAL ELEMENT 1] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 2] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 3] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 4] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 5] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
 
 ### 2.3 Litigation Activity
 
-| Parties | Case Type | Jurisdiction | Status | Key Details |
-|---|---|---|---|---|
-| [ROW 1] |  |  |  |  |
-| [ROW 2] |  |  |  |  |
+| Parties              | Case Type                                  | Jurisdiction | Status               | Key Details |
+| -------------------- | ------------------------------------------ | ------------ | -------------------- | ----------- |
+| [PARTY 1 vs PARTY 2] | [Opposition / Infringement / Cancellation] | [COUNTRY]    | [Active / Concluded] | [Summary]   |
+| [PARTY 1 vs PARTY 2] | [Opposition / Infringement / Cancellation] | [COUNTRY]    | [Active / Concluded] | [Summary]   |
 
 ### 2.4 Trademark Assessment Comments
 
-* [Comment on exact matches in the main class.]
-* [Comment on similar or phonetic matches.]
-* [Comment on exact matches outside the main class, if searched.]
-* [Comment on the most material results and why they matter.]
-* [Comment on litigation activity and whether it adds risk.]
+* [State whether exact matches were found in the main class.]
+* [State whether similar or phonetic matches were found.]
+* [State whether any exact matches were found outside the main class, if searched.]
+* [State which results appear most material and why.]
+* [State whether litigation activity was found, the type of case, and if it adds risk.]
 
 ---
 
@@ -191,28 +307,28 @@ Date of report: [DATE]
 
 ### 3.1 Summary
 
-| Item | Result |
-|---|---|
+| Item                         | Result               |
+| ---------------------------- | -------------------- |
 | Exact same name found online | [Yes / No / Limited / Not performed (user opted out)] |
-| Similar names found online | [Yes / No / Not performed (user opted out)] |
-| Commercial use observed | [Yes / No / Limited / Not performed (user opted out)] |
+| Similar names found online   | [Yes / No / Not performed (user opted out)]           |
+| Commercial use observed      | [Yes / No / Limited / Not performed (user opted out)] |
 
 ### 3.2 Most Relevant Web Findings (Top 5)
 
-| Name / Sign | Webpage URL / Source | Territory | Type of use | Notes |
-|---|---|---|---|---|
-| [ROW 1] |  |  |  |  |
-| [ROW 2] |  |  |  |  |
-| [ROW 3] |  |  |  |  |
-| [ROW 4] |  |  |  |  |
-| [ROW 5] |  |  |  |  |
+| Name / Sign | Webpage URL / Source | Territory          | Type of use                                         | Notes            |
+| ----------- | -------------------- | ------------------ | --------------------------------------------------- | ---------------- |
+| [NAME 1]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 2]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 3]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 4]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 5]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
 
 ### 3.3 Web Search Comments
 
 * [State whether the searched name appears to be in active commercial use online.]
 * [State whether similar names create practical marketplace overlap.]
 * [State whether any domain or branding conflicts are notable.]
-* [If web search was not run, state that online presence search was not performed at the user’s request.]
+* [If web search was not run, state: "Online presence search not performed (user opted out)."]
 
 ---
 
@@ -222,8 +338,8 @@ Overall clearance view: [🟢 Low / 🟠 Medium / 🔴 High concern]
 
 * [Key takeaway 1: concise conclusion on trademark database results.]
 * [Key takeaway 2: concise conclusion on online use / marketplace presence.]
-* [Key takeaway 3: main legal or commercial risk.]
-* [Key takeaway 4: practical next step.]
+* [Key takeaway 3: note on main legal or commercial risk.]
+* [Key takeaway 4: optional recommendation, e.g. proceed / proceed with caution / consider narrowing / consider alternate mark.]
 
 ---
 
@@ -234,7 +350,10 @@ This report is produced for informational purposes only and does not constitute 
 
 
 def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
-    text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
+    if isinstance(payload, str):
+        text = payload
+    else:
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
@@ -255,143 +374,377 @@ def clean_mark(value: str) -> str:
 
 def safe_filename(value: str) -> str:
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", clean_mark(value)).strip("._")
-    return name or "trademark_knockout_report"
+    return name or "trademark_report"
 
 
-def default_output_dir() -> Path:
-    configured = os.environ.get("TRADEMARK_REPORT_OUTPUT_DIR")
-    if configured:
-        path = Path(configured).expanduser()
-        if not path.is_absolute():
-            path = BASE_DIR / path
-        return path.resolve()
-    return (BASE_DIR.parent / "reports").resolve()
+def normalize_classes(classes: Any) -> List[str]:
+    if isinstance(classes, str):
+        parts = re.split(r"[,;\s]+", classes)
+    else:
+        parts = list(classes or [])
+    output: List[str] = []
+    for item in parts:
+        text = str(item).strip()
+        if not text:
+            continue
+        if not text.isdigit():
+            raise ValueError(f"Nice class must be a number from 1 to 45: {text}")
+        number = int(text)
+        if number < 1 or number > 45:
+            raise ValueError(f"Nice class out of range 1 to 45: {text}")
+        normalized = str(number)
+        if normalized not in output:
+            output.append(normalized)
+    if not output:
+        raise ValueError("At least one Nice class is required.")
+    return output
 
 
-def public_base_url() -> Optional[str]:
-    value = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
-    return value.rstrip("/") if value else None
+def normalize_jurisdictions(jurisdictions: Any) -> Tuple[List[str], List[str], bool]:
+    if isinstance(jurisdictions, str):
+        raw_parts = [part.strip() for part in re.split(r"[,;/]+", jurisdictions) if part.strip()]
+    else:
+        raw_parts = [str(part).strip() for part in jurisdictions or [] if str(part).strip()]
+    if not raw_parts:
+        raise ValueError("At least one jurisdiction or registration office is required.")
+
+    offices: List[str] = []
+    notes: List[str] = []
+    saw_specific_country = False
+    saw_eu_scope = False
+
+    for raw in raw_parts:
+        key = re.sub(r"\s+", " ", raw.strip().upper())
+        code = OFFICE_ALIASES.get(key, key if re.fullmatch(r"[A-Z]{2}", key) else None)
+        if not code:
+            notes.append(
+                f"Could not confidently map jurisdiction '{raw}'. Use the CompuMark office-code lookup if needed."
+            )
+            continue
+        if code not in offices:
+            offices.append(code)
+        if code == "EM":
+            saw_eu_scope = True
+        elif code != "WO":
+            saw_specific_country = True
+            if code in EU_COUNTRY_OFFICES:
+                saw_eu_scope = True
+
+    if saw_eu_scope and "EM" not in offices:
+        offices.append("EM")
+    if (saw_specific_country or saw_eu_scope) and "WO" not in offices:
+        offices.append("WO")
+    if not offices:
+        raise ValueError("No usable registration office code could be derived.")
+    limit_wo = "WO" in offices and len([code for code in offices if code != "WO"]) > 0
+    return offices, notes, limit_wo
 
 
-def public_file_url(path: Path) -> Optional[str]:
-    base = public_base_url()
-    if not base:
-        return None
-    try:
-        relative = path.resolve().relative_to(default_output_dir())
-    except ValueError:
-        return None
-    return f"{base}/reports/{quote(relative.as_posix())}"
+def build_trademark_search_args(
+    offices: List[str],
+    limit_wo: bool,
+    search_fields: List[Dict[str, str]],
+    phonetics: bool,
+) -> Dict[str, Any]:
+    return {
+        "activeOnly": False,
+        "centralEuropeanPhonetics": phonetics,
+        "crossReferences": True,
+        "japanesePhonetics": phonetics,
+        "limitWOresultsToDesignated": limit_wo,
+        "phonetics": phonetics,
+        "plurals": True,
+        "registrationOfficeCodes": offices,
+        "searchFields": search_fields,
+    }
 
 
-def domain_for(url: str) -> str:
-    parsed = urlparse(url)
-    return (parsed.netloc or url).removeprefix("www.")
+def get_workflow(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    language = arguments.get("language") or "detected from user prompt"
+    return {
+        "language": language,
+        "instructions": WORKFLOW_INSTRUCTIONS,
+        "required_compumark_tool_purposes": [
+            "identical knockout trademark search",
+            "custom/screening trademark search",
+            "trademark content/details for up to 100 IDs",
+            "full-text URL creation for trademark IDs",
+            "trademark litigation/caselaw search",
+        ],
+        "online_presence_search_behavior": (
+            "Run online-presence search by default using ChatGPT's or Claude's own browsing/web-search capability. "
+            "Skip it only if the user explicitly opts out."
+        ),
+    }
 
 
-def is_table_line(line: str) -> bool:
-    stripped = line.strip()
-    return stripped.startswith("|") and stripped.endswith("|")
+def get_report_template(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "template_markdown": REPORT_TEMPLATE,
+        "drafting_rules": [
+            "Keep the section numbering and structure unchanged.",
+            "Localize visible headings, metadata labels, table headers, enum values, and disclaimer text.",
+            "Top 5 tables must contain exactly five data rows.",
+            "Use only source-backed facts. Fill empty Top 5 rows with a localized equivalent of 'No further material source-backed finding'.",
+            "Use only 🟢 Low, 🟠 Medium, or 🔴 High for risk statements.",
+            "Display only domains as link text while embedding full absolute URLs.",
+        ],
+    }
 
 
-def table_after_heading(markdown_text: str, heading_number: str) -> List[str]:
+def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    mark = clean_mark(arguments.get("mark", ""))
+    if not mark:
+        raise ValueError("mark is required.")
+    nice_classes = normalize_classes(arguments.get("nice_classes") or arguments.get("classes"))
+    offices, mapping_notes, limit_wo = normalize_jurisdictions(arguments.get("jurisdictions"))
+    match_scope = (arguments.get("match_scope") or "exact").strip().lower()
+    if match_scope not in {"exact", "contains"}:
+        match_scope = "exact"
+    web_pref = arguments.get("web_search_enabled", True)
+    if isinstance(web_pref, str):
+        web_enabled = web_pref.strip().lower() not in {"no", "false", "0", "n", "disabled", "skip", "off"}
+    elif web_pref is None:
+        web_enabled = True
+    else:
+        web_enabled = bool(web_pref)
+
+    route_a = {
+        "tool_purpose": "CompuMark identical knockout search",
+        "arguments": {
+            "trademarkName": mark,
+            "registrationOfficeCodes": offices,
+            "classes": nice_classes,
+            "limitWOresultsToDesignated": limit_wo,
+        },
+    }
+
+    route_b_b1 = {
+        "stage": "B1",
+        "stop_rule": "If this returns any usable exact-match results, use it as the primary Route B set and do not broaden.",
+        "tool_purpose": "CompuMark custom/screening trademark search",
+        "arguments": build_trademark_search_args(
+            offices,
+            limit_wo,
+            [
+                {
+                    "name": "EXACT_WORD_MARK_SPECIFICATION",
+                    "operator": "CONTAINS",
+                    "value": mark,
+                }
+            ],
+            phonetics=False,
+        ),
+    }
+    route_b_b2 = []
+    route_b_b3 = []
+    for nice_class in nice_classes:
+        base_fields = [
+            {"name": "WORD_MARK_SPECIFICATION", "operator": "CONTAINS", "value": mark},
+            {"name": "INT_CLASS_NUMBER", "operator": "EQUALS", "value": nice_class},
+        ]
+        route_b_b2.append(
+            {
+                "stage": "B2",
+                "nice_class": nice_class,
+                "run_only_if": "B1 returned 0 usable results.",
+                "tool_purpose": "CompuMark custom/screening trademark search",
+                "arguments": build_trademark_search_args(offices, limit_wo, base_fields, phonetics=False),
+            }
+        )
+        route_b_b3.append(
+            {
+                "stage": "B3",
+                "nice_class": nice_class,
+                "run_only_if": f"B2 for class {nice_class} returned 0 usable results.",
+                "tool_purpose": "CompuMark custom/screening trademark search",
+                "arguments": build_trademark_search_args(offices, limit_wo, base_fields, phonetics=True),
+            }
+        )
+
+    online_queries = []
+    if web_enabled:
+        online_queries = [
+            f'"{mark}"',
+            f'"{mark}" ("app" OR "software" OR "SaaS" OR "API" OR "extension" OR "plugin" OR "platform")',
+            f'"{mark}" (Amazon OR Walmart)',
+        ]
+
+    return {
+        "planned_steps_block": [
+            "Get search criteria",
+            "Conduct trademark searches, litigation searches & online-presence search",
+            "Analyze trademark risk",
+            "Draft report",
+            "Generate final PDF",
+        ],
+        "search_statement": (
+            f"Search {mark} in {', '.join(offices)} for Nice class(es) "
+            f"{', '.join(nice_classes)}, using {match_scope} matching, reviewing active and inactive records "
+            "with default broad screening settings."
+        ),
+        "normalized_inputs": {
+            "mark": mark,
+            "nice_classes": nice_classes,
+            "registrationOfficeCodes": offices,
+            "limitWOresultsToDesignated": limit_wo,
+            "match_scope": match_scope,
+            "web_search_enabled": web_enabled,
+            "mapping_notes": mapping_notes,
+        },
+        "trademark_route_a": route_a,
+        "trademark_route_b": {
+            "stages": [route_b_b1] + route_b_b2 + route_b_b3,
+            "reporting_requirements": [
+                "Record which stage produced the working set.",
+                "Record counts for every attempted stage.",
+                "Highlight exact matches in the requested class and outside the requested class.",
+            ],
+        },
+        "litigation_search_templates": [
+            {
+                "purpose": "Owner-related opposition search, repeated for distinctive owner fragments from the top trademarks.",
+                "request": {
+                    "conditions": [
+                        {"field": "CASE_DOMAIN", "op": "EQ", "value": "TRADEMARK", "logical_connector_to_next": "AND"},
+                        {"field": "FIRST_ACTION_TYPE", "op": "EQ", "value": "OPPOSITION", "logical_connector_to_next": "AND"},
+                        {"field": "PARTY_OPTIMIZED_NAME", "op": "LIKE", "value": "%OWNER_FRAGMENT%", "logical_connector_to_next": "AND"},
+                        {"field": "PARTY_ROLE", "op": "EQ", "value": "PLAINTIFF", "logical_connector_to_next": "AND"},
+                        {"field": "PARTY_IS_EX_OFFICIO", "op": "EQ", "value": "false"},
+                    ],
+                    "fields": [
+                        "GUID",
+                        "CASE_NAME",
+                        "FIRST_ACTION_DATE",
+                        "FIRST_ACTION_TYPE",
+                        "CASE_STATUS",
+                        "CASE_RESOLUTION",
+                        "DOCKET_COURT_COUNTRY",
+                        "PARTY_PLAINTIFF_NAME",
+                        "PARTY_DEFENDANT_NAME",
+                    ],
+                    "limit": 10,
+                    "order_by": {"FIRST_ACTION_DATE": "DESC"},
+                },
+            },
+            {
+                "purpose": "Mark-related opposition search, repeated for the most relevant trademark names.",
+                "request": {
+                    "conditions": [
+                        {"field": "CASE_DOMAIN", "op": "EQ", "value": "TRADEMARK", "logical_connector_to_next": "AND"},
+                        {"field": "FIRST_ACTION_TYPE", "op": "EQ", "value": "OPPOSITION", "logical_connector_to_next": "AND"},
+                        {"field": "TRADEMARK_VERBAL_ELEMENT", "op": "EQ", "value": mark},
+                    ],
+                    "fields": [
+                        "GUID",
+                        "CASE_NAME",
+                        "FIRST_ACTION_DATE",
+                        "FIRST_ACTION_TYPE",
+                        "CASE_STATUS",
+                        "CASE_RESOLUTION",
+                        "DOCKET_COURT_COUNTRY",
+                        "TRADEMARK_VERBAL_ELEMENT",
+                    ],
+                    "limit": 10,
+                    "order_by": {"FIRST_ACTION_DATE": "DESC"},
+                },
+            },
+        ],
+        "online_presence": {
+            "enabled": web_enabled,
+            "default_behavior": "enabled unless the user explicitly opts out",
+            "queries": online_queries,
+            "note": (
+                "Run these with ChatGPT's or Claude's own browsing/web-search capability."
+                if web_enabled
+                else "Online presence search skipped because the user opted out."
+            ),
+        },
+        "post_collection": [
+            "Merge Route A and Route B IDs and de-duplicate.",
+            "Retrieve trademark details for no more than 100 IDs per content call.",
+            "Create full-text URLs for selected top IDs.",
+            "Select five most relevant trademarks by name similarity, active status, class fit, and jurisdiction fit.",
+            "Analyze risk before drafting.",
+        ],
+    }
+
+
+def table_lines_after_heading(markdown_text: str, heading: str) -> List[str]:
     lines = markdown_text.splitlines()
-    heading_re = re.compile(rf"^\s*###\s+{re.escape(heading_number)}\b")
-    start_index = None
-    for index, line in enumerate(lines):
-        if heading_re.search(line):
-            start_index = index
-            break
-    if start_index is None:
+    try:
+        start = next(idx for idx, line in enumerate(lines) if line.strip().lower() == heading.lower())
+    except StopIteration:
         return []
-
-    table_lines: List[str] = []
+    table: List[str] = []
     found = False
-    for line in lines[start_index + 1 :]:
+    for line in lines[start + 1 :]:
         stripped = line.strip()
         if stripped.startswith("#") and found:
             break
-        if is_table_line(stripped):
-            table_lines.append(stripped)
+        if stripped.startswith("|") and stripped.endswith("|"):
+            table.append(stripped)
             found = True
-            continue
-        if found and stripped:
+        elif found and stripped:
             break
-    return table_lines
+    return table
 
 
-def count_markdown_table_data_rows(table_lines: Sequence[str]) -> int:
+def count_markdown_table_data_rows(table_lines: List[str]) -> int:
     if not table_lines:
         return 0
     rows = [line for line in table_lines if not PIPE_SEPARATOR_RE.match(line)]
     return max(0, len(rows) - 1)
 
 
-def required_section_missing(markdown_text: str, heading_regex: str) -> bool:
-    return re.search(heading_regex, markdown_text, flags=re.IGNORECASE | re.MULTILINE) is None
-
-
-def validate_markdown_report(markdown_text: str) -> Dict[str, Any]:
+def validate_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    text = arguments.get("markdown") or arguments.get("markdown_text") or ""
+    if not text.strip():
+        raise ValueError("markdown is required.")
     issues: List[str] = []
     warnings: List[str] = []
-    text = markdown_text or ""
-
-    if not text.strip():
-        issues.append("Report Markdown is empty.")
-        return {"valid": False, "issues": issues, "warnings": warnings}
-
-    section_checks = [
-        ("title", r"^#\s+\S"),
-        ("Section 1", r"^##\s+1\.\s+"),
-        ("Section 2", r"^##\s+2\.\s+"),
-        ("Section 2.1", r"^###\s+2\.1\b"),
-        ("Section 2.2", r"^###\s+2\.2\b"),
-        ("Section 2.3", r"^###\s+2\.3\b"),
-        ("Section 2.4", r"^###\s+2\.4\b"),
-        ("Section 3", r"^##\s+3\.\s+"),
-        ("Section 3.1", r"^###\s+3\.1\b"),
-        ("Section 3.2", r"^###\s+3\.2\b"),
-        ("Section 3.3", r"^###\s+3\.3\b"),
-        ("Section 4", r"^##\s+4\.\s+"),
+    required_sections = [
+        "## 1. Search Criteria",
+        "## 2. CompuMark Search Results",
+        "### 2.1 Summary",
+        "### 2.2 Most Relevant Trademark References (Top 5)",
+        "### 2.3 Litigation Activity",
+        "### 2.4 Trademark Assessment Comments",
+        "## 3. Online Presence Search",
+        "### 3.1 Summary",
+        "### 3.2 Most Relevant Web Findings (Top 5)",
+        "### 3.3 Web Search Comments",
+        "## 4. Key Takeaways",
     ]
-    for label, pattern in section_checks:
-        if required_section_missing(text, pattern):
-            issues.append(f"Missing required report structure element: {label}.")
+    lowered = text.lower()
+    for section in required_sections:
+        if section.lower() not in lowered:
+            issues.append(f"Missing required section: {section}")
 
-    if count_markdown_table_data_rows(table_after_heading(text, "2.2")) != 5:
-        found = count_markdown_table_data_rows(table_after_heading(text, "2.2"))
-        issues.append(f"Section 2.2 Top 5 table has {found} data rows; expected exactly 5.")
-
-    if count_markdown_table_data_rows(table_after_heading(text, "3.2")) != 5:
-        found = count_markdown_table_data_rows(table_after_heading(text, "3.2"))
-        issues.append(f"Section 3.2 Top 5 table has {found} data rows; expected exactly 5.")
-
-    risk_tokens = {match.group(0).strip() for match in RISK_TOKEN_RE.finditer(text)}
-    unsupported_risks = sorted(token for token in risk_tokens if token not in RISK_LABELS)
-    if unsupported_risks:
-        issues.append("Unsupported risk labels found: " + ", ".join(unsupported_risks))
-    if not risk_tokens:
-        issues.append("No required risk label found; use exactly one of 🟢 Low, 🟠 Medium, or 🔴 High.")
-
-    placeholder_matches = sorted(set(match.group(0) for match in PLACEHOLDER_RE.finditer(text)))
-    if placeholder_matches:
-        issues.append("Unresolved template placeholders remain: " + ", ".join(placeholder_matches[:12]))
-
-    disclaimer_present = re.search(r"(?im)^Disclaimer\s*$", text) is not None
-    legal_advice_phrase = re.search(
-        r"(?i)(does not constitute legal advice|no constituye asesoramiento legal|ne constitue pas un conseil juridique|keine rechtsberatung|non costituisce consulenza legale)",
-        text,
+    top_tm_rows = count_markdown_table_data_rows(
+        table_lines_after_heading(text, "### 2.2 Most Relevant Trademark References (Top 5)")
     )
-    if not disclaimer_present and not legal_advice_phrase:
-        issues.append("Disclaimer section or localized legal-advice disclaimer could not be found.")
+    if top_tm_rows != 5:
+        issues.append(f"Section 2.2 Top 5 table has {top_tm_rows} data rows; expected exactly 5.")
 
-    for label, url in LINK_RE.findall(text):
-        expected = domain_for(url)
-        normalized_label = label.strip().removeprefix("www.")
-        if normalized_label.lower() != expected.lower():
-            issues.append(
-                f"Visible link text '{label}' should be the source domain '{expected}' for URL {url}."
-            )
+    top_web_rows = count_markdown_table_data_rows(
+        table_lines_after_heading(text, "### 3.2 Most Relevant Web Findings (Top 5)")
+    )
+    if top_web_rows != 5:
+        issues.append(f"Section 3.2 Top 5 table has {top_web_rows} data rows; expected exactly 5.")
+
+    emoji_risks = set(re.findall(r"[🟢🟠🔴]\s*[^\s|,\]/]+", text))
+    unsupported = sorted(label for label in emoji_risks if label not in SUPPORTED_RISK_LABELS)
+    if unsupported:
+        issues.append(f"Unsupported risk labels found: {', '.join(unsupported)}")
+
+    if "http://" in text or "https://" in text:
+        for label, url in LINK_RE.findall(text):
+            expected_domain = domain_for(url)
+            if label.startswith("http"):
+                warnings.append(f"Visible link text should be a domain, not a full URL: {label}")
+            elif expected_domain and label not in {expected_domain, "full-text"} and "." in expected_domain:
+                warnings.append(f"Check link label '{label}' for URL {url}; preferred visible text is '{expected_domain}'.")
 
     return {"valid": not issues, "issues": issues, "warnings": warnings}
 
@@ -406,8 +759,16 @@ def require_pdf_dependencies() -> None:
         raise RuntimeError(
             "Missing PDF dependencies: "
             + ", ".join(missing)
-            + ". Install them with: python3 -m pip install -r requirements.txt"
+            + ". Install with: python3 -m pip install -r requirements.txt"
         )
+
+
+def domain_for(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        return parsed.netloc.replace("www.", "") or url
+    except Exception:
+        return url
 
 
 def inline_markup(text: str) -> str:
@@ -417,17 +778,25 @@ def inline_markup(text: str) -> str:
         parts.append(html.escape(text[last : match.start()]))
         label = match.group(1).strip() or domain_for(match.group(2))
         url = match.group(2).strip()
-        parts.append(f'<link href="{html.escape(url, quote=True)}">{html.escape(label)}</link>')
+        parts.append(
+            '<link href="{}">{}</link>'.format(
+                html.escape(url, quote=True),
+                html.escape(label),
+            )
+        )
         last = match.end()
     parts.append(html.escape(text[last:]))
     marked = "".join(parts)
 
-    risk_markup = {
+    replacements = {
         "🟢 Low": '<font color="#188038">Low</font>',
         "🟠 Medium": '<font color="#b06000">Medium</font>',
         "🔴 High": '<font color="#b00020">High</font>',
+        "🟢 Bajo": '<font color="#188038">Bajo</font>',
+        "🟠 Medio": '<font color="#b06000">Medio</font>',
+        "🔴 Alto": '<font color="#b00020">Alto</font>',
     }
-    for needle, replacement in risk_markup.items():
+    for needle, replacement in replacements.items():
         marked = marked.replace(html.escape(needle), replacement)
         marked = marked.replace(needle, replacement)
     marked = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", marked)
@@ -436,87 +805,76 @@ def inline_markup(text: str) -> str:
 
 def build_styles() -> Dict[str, Any]:
     base = getSampleStyleSheet()
-    return {
-        "title": ParagraphStyle(
-            "TitleCustom",
-            parent=base["Title"],
-            fontName="Helvetica-Bold",
-            fontSize=18,
-            leading=22,
-            alignment=TA_LEFT,
-            textColor=colors.HexColor("#222222"),
-            spaceAfter=8,
-        ),
-        "h1": ParagraphStyle(
-            "Heading1Custom",
-            parent=base["Heading1"],
-            fontName="Helvetica-Bold",
-            fontSize=14,
-            leading=18,
-            textColor=colors.HexColor("#222222"),
-            spaceBefore=8,
-            spaceAfter=6,
-        ),
-        "h2": ParagraphStyle(
-            "Heading2Custom",
-            parent=base["Heading2"],
-            fontName="Helvetica-Bold",
-            fontSize=12,
-            leading=15,
-            textColor=colors.HexColor("#222222"),
-            spaceBefore=6,
-            spaceAfter=4,
-        ),
-        "h3": ParagraphStyle(
-            "Heading3Custom",
-            parent=base["Heading3"],
-            fontName="Helvetica-Bold",
-            fontSize=10.5,
-            leading=13,
-            textColor=colors.HexColor("#222222"),
-            spaceBefore=5,
-            spaceAfter=3,
-        ),
-        "body": ParagraphStyle(
-            "BodyCustom",
-            parent=base["BodyText"],
-            fontName="Helvetica",
-            fontSize=9,
-            leading=12,
-            textColor=colors.HexColor("#222222"),
-            spaceAfter=4,
-        ),
-        "bullet": ParagraphStyle(
-            "BulletCustom",
-            parent=base["BodyText"],
-            fontName="Helvetica",
-            fontSize=9,
-            leading=12,
-            leftIndent=12,
-            firstLineIndent=-8,
-            bulletIndent=0,
-            textColor=colors.HexColor("#222222"),
-            spaceAfter=3,
-        ),
-        "cell": ParagraphStyle(
-            "CellCustom",
-            parent=base["BodyText"],
-            fontName="Helvetica",
-            fontSize=7.2,
-            leading=8.7,
-            textColor=colors.HexColor("#222222"),
-            spaceAfter=0,
-        ),
-        "cell_header": ParagraphStyle(
-            "CellHeaderCustom",
-            parent=base["BodyText"],
-            fontName="Helvetica-Bold",
-            fontSize=7.2,
-            leading=8.7,
-            textColor=colors.HexColor("#222222"),
-            spaceAfter=0,
-        ),
-    }
+    styles: Dict[str, Any] = {}
+    styles["title"] = ParagraphStyle(
+        "TitleCustom",
+        parent=base["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor("#222222"),
+        spaceAfter=8,
+    )
+    styles["h1"] = ParagraphStyle(
+        "Heading1Custom",
+        parent=base["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        textColor=colors.HexColor("#222222"),
+        spaceBefore=8,
+        spaceAfter=6,
+    )
+    styles["h2"] = ParagraphStyle(
+        "Heading2Custom",
+        parent=base["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=colors.HexColor("#222222"),
+        spaceBefore=6,
+        spaceAfter=4,
+    )
+    styles["h3"] = ParagraphStyle(
+        "Heading3Custom",
+        parent=base["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=10.5,
+        leading=13,
+        textColor=colors.HexColor("#222222"),
+        spaceBefore=5,
+        spaceAfter=3,
+    )
+    styles["body"] = ParagraphStyle(
+        "BodyCustom",
+        parent=base["BodyText"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#222222"),
+        spaceAfter=4,
+    )
+    styles["bullet"] = ParagraphStyle(
+        "BulletCustom",
+        parent=styles["body"],
+        leftIndent=12,
+        firstLineIndent=-8,
+        bulletIndent=0,
+    )
+    styles["cell"] = ParagraphStyle(
+        "CellCustom",
+        parent=styles["body"],
+        fontSize=7.2,
+        leading=8.7,
+        spaceAfter=0,
+    )
+    styles["cell_header"] = ParagraphStyle("CellHeaderCustom", parent=styles["cell"], fontName="Helvetica-Bold")
+    return styles
+
+
+def is_table_line(line: str) -> bool:
+    return line.strip().startswith("|") and line.strip().endswith("|")
 
 
 def parse_table_row(line: str) -> List[str]:
@@ -525,7 +883,13 @@ def parse_table_row(line: str) -> List[str]:
 
 
 def normalize_table(lines: Sequence[str]) -> List[List[str]]:
-    rows = [parse_table_row(line) for line in lines if not PIPE_SEPARATOR_RE.match(line)]
+    rows = []
+    for line in lines:
+        if PIPE_SEPARATOR_RE.match(line):
+            continue
+        row = parse_table_row(line)
+        if row:
+            rows.append(row)
     if not rows:
         return []
     max_cols = max(len(row) for row in rows)
@@ -609,7 +973,7 @@ def build_body_pdf(markdown_text: str, output_path: Path) -> None:
         topMargin=18 * mm,
         bottomMargin=18 * mm,
         title="Trademark Knockout Search Report",
-        author="ChatGPT",
+        author="Codex",
     )
     doc.build(markdown_to_flowables(markdown_text, styles))
 
@@ -622,28 +986,13 @@ def subtitle_font_name() -> str:
         return SUBTITLE_FONT_FALLBACK
 
 
-def fit_subtitle(subject: str, font_name: str, font_size: int, max_width: float) -> str:
-    text = clean_mark(subject) or "Trademark Knockout Report"
-    if pdfmetrics.stringWidth(text, font_name, font_size) <= max_width:
-        return text
-    ellipsis = "..."
-    while text and pdfmetrics.stringWidth(text + ellipsis, font_name, font_size) > max_width:
-        text = text[:-1]
-    return (text.rstrip() + ellipsis) if text else "..."
-
-
 def build_overlay_pdf(subject: str, output_path: Path) -> None:
     pdf_canvas = canvas.Canvas(str(output_path), pagesize=(PAGE_W, PAGE_H))
     pdf_canvas.setFillColor(colors.white)
     pdf_canvas.rect(SUBTITLE_COVER_X, SUBTITLE_COVER_Y, SUBTITLE_COVER_W, SUBTITLE_COVER_H, stroke=0, fill=1)
     pdf_canvas.setFillColor(colors.HexColor("#222222"))
-    font_name = subtitle_font_name()
-    pdf_canvas.setFont(font_name, SUBTITLE_FONT_SIZE)
-    pdf_canvas.drawString(
-        SUBTITLE_X,
-        SUBTITLE_BASELINE_Y,
-        fit_subtitle(subject, font_name, SUBTITLE_FONT_SIZE, SUBTITLE_COVER_W),
-    )
+    pdf_canvas.setFont(subtitle_font_name(), SUBTITLE_FONT_SIZE)
+    pdf_canvas.drawString(SUBTITLE_X, SUBTITLE_BASELINE_Y, clean_mark(subject) or "Trademark Report")
     pdf_canvas.save()
 
 
@@ -667,178 +1016,205 @@ def merge_template(template_path: Path, body_path: Path, overlay_path: Path, out
         writer.write(handle)
 
 
-def resolve_output_path(arguments: Dict[str, Any], searched_mark: str) -> Path:
-    output_value = arguments.get("output_filename") or arguments.get("output_path")
-    if output_value:
-        path = Path(str(output_value)).expanduser()
+def default_output_dir() -> Path:
+    configured = os.environ.get("TRADEMARK_REPORT_OUTPUT_DIR")
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path.resolve()
+    return Path.cwd().resolve()
+
+
+def public_base_url() -> Optional[str]:
+    value = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    if not value:
+        return None
+    return value.rstrip("/")
+
+
+def public_file_url(path: Path) -> Optional[str]:
+    base_url = public_base_url()
+    if not base_url:
+        return None
+    try:
+        resolved = path.resolve()
+        output_dir = default_output_dir()
+        relative = resolved.relative_to(output_dir)
+    except ValueError:
+        return None
+    return f"{base_url}/reports/{relative.as_posix()}"
+
+
+def resolve_output_path(output_path: Optional[str], subject: str) -> Path:
+    if output_path:
+        path = Path(output_path).expanduser()
         if not path.is_absolute():
             path = default_output_dir() / path
     else:
-        path = default_output_dir() / f"{safe_filename(searched_mark)}_knockout_report.pdf"
+        path = default_output_dir() / f"trademark_report_{safe_filename(subject)}.pdf"
     if path.suffix.lower() != ".pdf":
-        raise ValueError("Output filename must end in .pdf.")
-    return path.resolve()
+        raise ValueError("Output filename must end with .pdf")
+    return path
 
 
-def get_workflow_contract(_: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "server_role": "artifact_and_quality_control_only",
-        "workflow_engine": "ChatGPT",
-        "contract_markdown": WORKFLOW_CONTRACT,
-        "action_tools": ["validate_knockout_report", "render_clarivate_knockout_pdf"],
-    }
-
-
-def get_report_template(_: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "template_markdown": REPORT_TEMPLATE,
-        "notes": [
-            "Localize visible report text as needed.",
-            "Do not translate source IDs, URLs, registration numbers, tool names, or trademark verbal elements.",
-            "Every Top 5 table must contain exactly five data rows.",
-            "Use only source-backed facts.",
-        ],
-    }
-
-
-def validate_knockout_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    markdown_text = arguments.get("markdown") or arguments.get("markdown_text") or ""
-    result = validate_markdown_report(str(markdown_text))
-    return {
-        "success": result["valid"],
-        "valid": result["valid"],
-        "issues": result["issues"],
-        "warnings": result["warnings"],
-    }
-
-
-def render_clarivate_knockout_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
+def generate_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
     require_pdf_dependencies()
+    subject = clean_mark(arguments.get("subject") or arguments.get("mark") or "")
+    if not subject:
+        raise ValueError("subject is required.")
+
     markdown_text = arguments.get("markdown") or arguments.get("markdown_text")
-    if not markdown_text or not str(markdown_text).strip():
-        raise ValueError("markdown is required.")
+    markdown_path_arg = arguments.get("markdown_path")
+    if markdown_text is None and markdown_path_arg:
+        markdown_path = Path(markdown_path_arg).expanduser()
+        if not markdown_path.is_absolute():
+            markdown_path = default_output_dir() / markdown_path
+        if not markdown_path.exists():
+            raise FileNotFoundError(f"Markdown report not found: {markdown_path}")
+        markdown_text = markdown_path.read_text(encoding="utf-8")
+    if markdown_text is None or not str(markdown_text).strip():
+        raise ValueError("markdown or markdown_path is required.")
 
-    searched_mark = clean_mark(str(arguments.get("searched_mark") or arguments.get("mark") or ""))
-    if not searched_mark:
-        raise ValueError("searched_mark is required.")
-
-    validation = validate_markdown_report(str(markdown_text))
-    if arguments.get("require_valid", True) and not validation["valid"]:
-        return {
-            "success": False,
-            "pdf_exists": False,
-            "validation": validation,
-            "error": "Report validation failed; fix the report and call render again.",
-        }
-
-    template_path = Path(str(arguments.get("template_path") or DEFAULT_TEMPLATE_PATH)).expanduser()
+    template_path = Path(arguments.get("template_path") or DEFAULT_TEMPLATE_PATH).expanduser()
     if not template_path.is_absolute():
         template_path = BASE_DIR / template_path
-    template_path = template_path.resolve()
     if not template_path.exists():
-        raise FileNotFoundError(f"Clarivate template PDF not found: {template_path}")
+        raise FileNotFoundError(f"Template PDF not found: {template_path}")
 
-    output_path = resolve_output_path(arguments, searched_mark)
+    output_path = resolve_output_path(arguments.get("output_path"), subject)
     save_markdown = bool(arguments.get("save_markdown", True))
-    markdown_path: Optional[Path] = None
+    markdown_output_path = None
     if save_markdown:
-        markdown_path = output_path.with_suffix(".md")
-        markdown_path.parent.mkdir(parents=True, exist_ok=True)
-        markdown_path.write_text(str(markdown_text), encoding="utf-8")
+        if arguments.get("markdown_output_path"):
+            markdown_output_path = Path(arguments["markdown_output_path"]).expanduser()
+            if not markdown_output_path.is_absolute():
+                markdown_output_path = default_output_dir() / markdown_output_path
+        else:
+            markdown_output_path = output_path.with_suffix(".md")
+        markdown_output_path.parent.mkdir(parents=True, exist_ok=True)
+        markdown_output_path.write_text(str(markdown_text), encoding="utf-8")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         body_pdf = tmpdir / "report_body.pdf"
         overlay_pdf = tmpdir / "cover_overlay.pdf"
         build_body_pdf(str(markdown_text), body_pdf)
-        build_overlay_pdf(str(arguments.get("cover_subtitle") or searched_mark), overlay_pdf)
+        build_overlay_pdf(subject, overlay_pdf)
         merge_template(template_path, body_pdf, overlay_pdf, output_path)
 
     if not output_path.exists() or output_path.stat().st_size <= 0:
         raise RuntimeError(f"PDF generation failed: {output_path}")
 
     pdf_url = public_file_url(output_path)
+    markdown_url = public_file_url(markdown_output_path) if markdown_output_path else None
     return {
-        "success": True,
-        "pdf_exists": True,
-        "filename": output_path.name,
-        "file_reference": str(output_path),
-        "artifact_link": pdf_url or str(output_path),
+        "pdf_path": str(output_path.resolve()),
         "pdf_url": pdf_url,
+        "download_the_report": pdf_url,
+        "pdf_exists": True,
         "pdf_size_bytes": output_path.stat().st_size,
-        "markdown_file_reference": str(markdown_path) if markdown_path else None,
-        "template_path": str(template_path),
-        "validation": validation,
+        "markdown_path": str(markdown_output_path.resolve()) if markdown_output_path else None,
+        "markdown_url": markdown_url,
+        "template_path": str(template_path.resolve()),
+        "pdf_generation_workflow": "Clarivate template merge: template cover + generated report body + template closing page",
+        "chatgpt_final_response_instruction": (
+            "Use download_the_report/pdf_url as the only PDF link. Do not create or link a ChatGPT-generated PDF artifact. "
+            "Do not fetch, open, download, inspect, or review the PDF URL; give the link directly to the user. "
+            "If pdf_url is null, tell the user that PUBLIC_BASE_URL is not configured on the MCP server."
+        ),
     }
-
-
-def healthcheck(_: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "ok": True,
-        "name": SERVER_NAME,
-        "version": SERVER_VERSION,
-        "template_exists": DEFAULT_TEMPLATE_PATH.exists(),
-        "default_output_dir": str(default_output_dir()),
-        "role": "validate_and_render_only",
-    }
-
-
-def version(_: Dict[str, Any]) -> Dict[str, Any]:
-    return {"name": SERVER_NAME, "version": SERVER_VERSION}
 
 
 TOOLS: Dict[str, Dict[str, Any]] = {
-    "get_workflow_contract": {
-        "description": "Return the workflow/tool-boundary contract. This is read-only guidance; ChatGPT still runs the workflow.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-        "handler": get_workflow_contract,
-    },
-    "get_report_template": {
-        "description": "Return the required Markdown report structure.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-        "handler": get_report_template,
-    },
-    "validate_knockout_report": {
-        "description": "Validate finalized knockout report Markdown before PDF rendering.",
+    "get_trademark_knockout_workflow": {
+        "description": "Return the MCP-only trademark knockout workflow instructions that replace the Codex plugin skill files.",
         "inputSchema": {
             "type": "object",
-            "required": ["markdown"],
-            "properties": {"markdown": {"type": "string", "description": "Final report Markdown."}},
-            "additionalProperties": False,
-        },
-        "handler": validate_knockout_report,
-    },
-    "render_clarivate_knockout_pdf": {
-        "description": "Render a validated Markdown report into a Clarivate-style PDF and confirm the file exists.",
-        "inputSchema": {
-            "type": "object",
-            "required": ["markdown", "searched_mark"],
             "properties": {
-                "markdown": {"type": "string", "description": "Final report Markdown."},
-                "searched_mark": {"type": "string", "description": "Searched mark for the cover subtitle."},
-                "cover_subtitle": {"type": "string", "description": "Optional cover subtitle override."},
-                "output_filename": {
+                "language": {
                     "type": "string",
-                    "description": "Output filename ending in .pdf. Relative paths resolve under the report output directory.",
-                },
-                "output_path": {"type": "string", "description": "Alias for output_filename."},
-                "template_path": {"type": "string", "description": "Optional Clarivate cover/closing PDF template path."},
-                "save_markdown": {"type": "boolean", "default": True},
-                "require_valid": {"type": "boolean", "default": True},
+                    "description": "Optional user-visible language name, otherwise detect from the user's prompt.",
+                }
             },
             "additionalProperties": False,
         },
-        "handler": render_clarivate_knockout_pdf,
+        "handler": get_workflow,
     },
-    "healthcheck": {
-        "description": "Check local renderer health and configured paths.",
+    "get_trademark_knockout_report_template": {
+        "description": "Return the exact report template and drafting rules for the trademark knockout report.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-        "handler": healthcheck,
+        "handler": get_report_template,
     },
-    "version": {
-        "description": "Return the local report MCP server version.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-        "handler": version,
+    "build_trademark_knockout_execution_plan": {
+        "description": "Normalize search inputs and return a concrete MCP tool-call plan for trademark, litigation, web, analysis, and PDF steps.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["mark", "jurisdictions", "nice_classes"],
+            "properties": {
+                "mark": {"type": "string", "description": "Proposed word mark exactly as provided by the user."},
+                "jurisdictions": {
+                    "description": "Jurisdictions or registration offices, such as EU, UK, US, WIPO, France, or office codes.",
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "nice_classes": {
+                    "description": "Nice classes as numbers from 1 to 45.",
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "match_scope": {
+                    "type": "string",
+                    "description": "Use 'exact' unless the user explicitly asked for containing matches.",
+                    "default": "exact",
+                },
+                "web_search_enabled": {
+                    "description": "Whether to run online-presence search. Defaults to true; set false only when the user explicitly opts out.",
+                    "type": "boolean",
+                    "default": True,
+                },
+            },
+            "additionalProperties": False,
+        },
+        "handler": build_execution_plan,
+    },
+    "validate_trademark_knockout_report": {
+        "description": "Check the drafted report against the required section, Top 5 row, link-label, and risk-label gates before PDF generation.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["markdown"],
+            "properties": {"markdown": {"type": "string", "description": "Final report markdown to validate."}},
+            "additionalProperties": False,
+        },
+        "handler": validate_report,
+    },
+    "generate_clarivate_report_pdf": {
+        "description": "Generate the final Clarivate-template PDF from finalized report markdown using the bundled template asset.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["subject"],
+            "properties": {
+                "subject": {"type": "string", "description": "Cover subtitle, usually the searched mark."},
+                "markdown": {"type": "string", "description": "Finalized report markdown text."},
+                "markdown_path": {"type": "string", "description": "Path to finalized report markdown, used if markdown is not supplied."},
+                "output_path": {
+                    "type": "string",
+                    "description": "PDF output path. Relative paths resolve under TRADEMARK_REPORT_OUTPUT_DIR or the server working directory.",
+                },
+                "template_path": {
+                    "type": "string",
+                    "description": "Optional alternative Clarivate template path. Defaults to the MCP server bundled template.",
+                },
+                "save_markdown": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Save the markdown next to the generated PDF.",
+                },
+                "markdown_output_path": {"type": "string", "description": "Optional path for the saved markdown copy."},
+            },
+            "additionalProperties": False,
+        },
+        "handler": generate_pdf,
     },
 }
 
@@ -860,7 +1236,11 @@ def handle_tools_list(message_id: Any) -> Dict[str, Any]:
         message_id,
         {
             "tools": [
-                {"name": name, "description": spec["description"], "inputSchema": spec["inputSchema"]}
+                {
+                    "name": name,
+                    "description": spec["description"],
+                    "inputSchema": spec["inputSchema"],
+                }
                 for name, spec in TOOLS.items()
             ]
         },
@@ -877,7 +1257,7 @@ def handle_tools_call(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]
         payload = handler(arguments)
         return json_rpc_result(message_id, text_result(payload))
     except Exception as exc:
-        return json_rpc_result(message_id, text_result({"success": False, "tool": name, "error": str(exc)}, is_error=True))
+        return json_rpc_result(message_id, text_result({"error": str(exc), "tool": name}, is_error=True))
 
 
 def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -895,10 +1275,8 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return handle_tools_list(message_id)
     if method == "tools/call":
         return handle_tools_call(message_id, params)
-    if method == "resources/list":
-        return json_rpc_result(message_id, {"resources": []})
-    if method == "prompts/list":
-        return json_rpc_result(message_id, {"prompts": []})
+    if method in {"resources/list", "prompts/list"}:
+        return json_rpc_result(message_id, {"resources": []} if method == "resources/list" else {"prompts": []})
     return json_rpc_error(message_id, -32601, f"Method not found: {method}")
 
 
@@ -917,140 +1295,29 @@ def run_stdio() -> int:
     return 0
 
 
-def sample_report() -> str:
-    no_finding = "No further material source-backed finding"
-    return f"""# AI Generated Trademark Knockout Search Report (Demo only)
-
-Mark searched: TESTMARK
-Date of report: 2026-05-17
-
----
-
-## 1. Search Criteria
-
-| Field | Details |
-|---|---|
-| Mark searched | TESTMARK |
-| Type | Word |
-| Territories covered | EU |
-| Nice classes | 9 |
-| Match scope | Exact only; plurals where supported |
-| Notes / assumptions | Smoke-test report using synthetic data. |
-
----
-
-## 2. CompuMark Search Results
-
-### 2.1 Summary
-
-| Item | Result |
-|---|---|
-| Total records reviewed | 0 |
-| Most relevant jurisdictions | EU |
-| Most relevant classes | 9 |
-| Overall initial risk impression | 🟢 Low |
-
-### 2.2 Most Relevant Trademark References (Top 5)
-
-| Verbal Element | Status | Registration Office | Class(es) | Number | Date | Owner | Full Text URL |
-|---|---|---|---|---|---|---|---|
-| {no_finding} |  |  |  |  |  |  | link unavailable |
-| {no_finding} |  |  |  |  |  |  | link unavailable |
-| {no_finding} |  |  |  |  |  |  | link unavailable |
-| {no_finding} |  |  |  |  |  |  | link unavailable |
-| {no_finding} |  |  |  |  |  |  | link unavailable |
-
-### 2.3 Litigation Activity
-
-| Parties | Case Type | Jurisdiction | Status | Key Details |
-|---|---|---|---|---|
-| {no_finding} |  |  |  | No source-backed litigation finding was identified. |
-| {no_finding} |  |  |  | No source-backed litigation finding was identified. |
-
-### 2.4 Trademark Assessment Comments
-
-* No exact matches are included in this smoke-test report.
-* No similar or phonetic matches are included in this smoke-test report.
-* No exact matches outside the main class are included in this smoke-test report.
-* No material source-backed trademark result is included in this smoke-test report.
-* No litigation activity is included in this smoke-test report.
-
----
-
-## 3. Online Presence Search
-
-### 3.1 Summary
-
-| Item | Result |
-|---|---|
-| Exact same name found online | Not performed (user opted out) |
-| Similar names found online | Not performed (user opted out) |
-| Commercial use observed | Not performed (user opted out) |
-
-### 3.2 Most Relevant Web Findings (Top 5)
-
-| Name / Sign | Webpage URL / Source | Territory | Type of use | Notes |
-|---|---|---|---|---|
-| {no_finding} | link unavailable | unknown |  | Online presence search was not performed. |
-| {no_finding} | link unavailable | unknown |  | Online presence search was not performed. |
-| {no_finding} | link unavailable | unknown |  | Online presence search was not performed. |
-| {no_finding} | link unavailable | unknown |  | Online presence search was not performed. |
-| {no_finding} | link unavailable | unknown |  | Online presence search was not performed. |
-
-### 3.3 Web Search Comments
-
-* Online presence search was not performed at the user's request.
-* Similar online names were not searched.
-* Domains and branding conflicts were not searched.
-
----
-
-## 4. Key Takeaways
-
-Overall clearance view: 🟢 Low
-
-* This smoke-test report contains no source-backed trademark conflicts.
-* Online use was not searched in this smoke test.
-* No legal or commercial risk conclusion is drawn from synthetic data.
-* Use this output only to verify validation and PDF rendering.
-
----
-
-Disclaimer
-
-This report is produced for informational purposes only and does not constitute legal advice. Trademark clearance searches are not exhaustive and do not guarantee the availability or registrability of a mark. Always consult a qualified trademark attorney before filing.
-"""
-
-
-def self_test(render: bool = False) -> int:
-    payload: Dict[str, Any] = {
-        "tools": list(TOOLS.keys()),
-        "healthcheck": healthcheck({}),
-        "validation": validate_markdown_report(sample_report()),
-    }
-    if render:
-        payload["render"] = render_clarivate_knockout_pdf(
-            {
-                "markdown": sample_report(),
-                "searched_mark": "TESTMARK",
-                "output_filename": "smoke_test_TESTMARK.pdf",
-            }
-        )
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if payload["validation"]["valid"] else 1
+def self_test() -> int:
+    tools = handle_tools_list(1)["result"]["tools"]
+    plan = build_execution_plan(
+        {
+            "mark": "NOVALYTIC",
+            "jurisdictions": ["EU", "UK"],
+            "nice_classes": ["9", "42"],
+        }
+    )
+    print(json.dumps({"tools": [tool["name"] for tool in tools], "sample_plan": plan}, ensure_ascii=False, indent=2))
+    return 0
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the trademark knockout report rendering MCP server.")
-    parser.add_argument("--self-test", action="store_true", help="Validate a synthetic report and print tool metadata.")
-    parser.add_argument("--self-test-render", action="store_true", help="Validate and render a synthetic PDF.")
+    parser = argparse.ArgumentParser(description="Run the trademark knockout report MCP server.")
+    parser.add_argument("--self-test", action="store_true", help="Print a sample tool list and execution plan, then exit.")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    if args.self_test or args.self_test_render:
-        return self_test(render=args.self_test_render)
+    if args.self_test:
+        return self_test()
     return run_stdio()
 
 

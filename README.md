@@ -1,104 +1,167 @@
 # Trademark Knockout Report MCP
 
-This package implements the UX-focused workflow boundary from the supplied
-prompt:
+This is a standalone MCP-only replacement for the Codex plugin skill layer. It
+does not call the CompuMark data APIs itself; instead, it gives Codex MCP tools
+for the workflow, search plan, report template, validation gates, and final PDF
+generation. Live trademark and litigation records still come from the existing
+Clarivate CompuMark MCP connector.
 
-- ChatGPT runs the trademark knockout workflow.
-- The existing Clarivate / CompuMark MCP supplies trademark and litigation data.
-- ChatGPT performs optional web search directly when the user agrees.
-- This local MCP server only validates the final Markdown report and renders the
-  verified Clarivate-style PDF.
+## What This Server Provides
 
-It deliberately does not expose a tool that performs trademark searches, runs
-litigation searches, performs web research, selects conflicts, assesses risk, or
-drafts the report narrative.
+- `get_trademark_knockout_workflow`
+  - Returns the full workflow and output rules that were previously stored in
+    plugin skill files.
+- `build_trademark_knockout_execution_plan`
+  - Normalizes mark, jurisdiction, Nice class, match scope, and web-search
+    preference into a concrete plan for the CompuMark MCP tools.
+- `get_trademark_knockout_report_template`
+  - Returns the required report structure.
+- `validate_trademark_knockout_report`
+  - Checks required sections, Top 5 table row counts, risk labels, and link
+    label warnings before PDF generation.
+- `generate_clarivate_report_pdf`
+  - Generates the final PDF with the bundled Clarivate template asset.
 
-## Tools
+## Install In Codex
 
-- `get_workflow_contract`
-  - Read-only summary of the required workflow and tool boundaries.
-- `get_report_template`
-  - Read-only Markdown template for the final report.
-- `validate_knockout_report`
-  - Checks required numbered sections, required Top 5 row counts, allowed risk
-    labels, unresolved placeholders, disclaimer presence, and domain-only link
-    labels.
-- `render_clarivate_knockout_pdf`
-  - Renders finalized Markdown to PDF, updates the Clarivate cover subtitle,
-    merges cover/body/closing pages, confirms the PDF exists, and returns a
-    verified file reference.
-- `healthcheck`
-- `version`
-
-## Local Codex registration
-
-From this workspace, register the stdio server:
+From this workspace, register the local server:
 
 ```bash
-codex mcp add trademark-knockout-report-renderer \
-  --env TRADEMARK_REPORT_OUTPUT_DIR="/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions 2/reports" \
-  -- python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions 2/trademark-knockout-report-mcp/server.py"
+codex mcp add trademark-knockout-report-workflow \
+  --env TRADEMARK_REPORT_OUTPUT_DIR="/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions/reports" \
+  -- python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions/trademark-knockout-report-mcp/server.py"
 ```
 
-Install dependencies if needed:
+Then start a new Codex session so the new MCP tools can be discovered.
+
+If `reportlab` or `pypdf` are missing in a different environment:
 
 ```bash
-python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions 2/trademark-knockout-report-mcp/requirements.txt"
+python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions/trademark-knockout-report-mcp/requirements.txt"
 ```
 
-## Smoke tests
+## Expected Workflow In A Report Run
 
-Validate the server and tool list:
+1. Call `get_trademark_knockout_workflow`.
+2. Ask the user only for missing inputs: mark, jurisdiction/office, and Nice
+   class. Do not ask about online presence unless the user raises it; online
+   presence is enabled by default.
+3. Call `build_trademark_knockout_execution_plan`.
+4. Use the existing CompuMark MCP connector tools by purpose:
+   - identical knockout trademark search;
+   - custom/screening trademark search;
+   - trademark content/details lookup;
+   - full-text URL creation;
+   - litigation/caselaw search.
+5. Run the online-presence check by default using ChatGPT's or Claude's own
+   browsing/web-search capability. Skip it only if the user explicitly opts out.
+6. Draft the report with `get_trademark_knockout_report_template`.
+7. Call `validate_trademark_knockout_report`.
+8. Call `generate_clarivate_report_pdf`.
+9. Give the user the `download_the_report`/`pdf_url` returned by
+   `generate_clarivate_report_pdf`. Do not fetch, open, download, inspect, or
+   review the final PDF URL.
+
+## Test From ChatGPT Web
+
+ChatGPT web cannot connect directly to this stdio MCP server. To test there, run
+the HTTP wrapper locally and expose it through a temporary HTTPS tunnel.
+
+Start the local HTTP MCP endpoint:
 
 ```bash
-python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions 2/trademark-knockout-report-mcp/server.py" --self-test
-```
-
-Validate and render a sample PDF:
-
-```bash
-python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions 2/trademark-knockout-report-mcp/server.py" --self-test-render
-```
-
-## HTTP wrapper
-
-For ChatGPT web testing, run the HTTP wrapper locally and expose it through a
-temporary HTTPS tunnel:
-
-```bash
-TRADEMARK_REPORT_OUTPUT_DIR="/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions 2/reports" \
-python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions 2/trademark-knockout-report-mcp/http_server.py" \
+TRADEMARK_REPORT_OUTPUT_DIR="/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions/reports" \
+python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions/trademark-knockout-report-mcp/http_server.py" \
   --host 127.0.0.1 \
   --port 8765
 ```
 
-Health check:
+Verify locally:
 
 ```bash
 curl http://127.0.0.1:8765/health
 ```
 
-If deployed on Render, set:
+Expose it with a tunnel. Examples:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8765
+```
+
+or:
+
+```bash
+ngrok http 8765
+```
+
+In ChatGPT web, create a custom MCP app/connector and use the HTTPS tunnel URL
+with `/mcp` appended, for example:
+
+```text
+https://example-tunnel.trycloudflare.com/mcp
+```
+
+For a first smoke test, use a short-lived private tunnel and no auth. Before
+sharing or publishing, put the server behind an authentication mechanism that
+your ChatGPT workspace supports and review the tool actions carefully.
+
+## Deploy On Render
+
+Upload these files with the same relative paths:
+
+```text
+server.py
+http_server.py
+requirements.txt
+assets/Clarivate_template.pdf
+```
+
+Use:
+
+```text
+Build command: pip install -r requirements.txt
+Start command: python3 http_server.py --host 0.0.0.0 --port $PORT
+```
+
+Set environment variables:
 
 ```text
 TRADEMARK_REPORT_OUTPUT_DIR=/tmp/reports
 PUBLIC_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com
 ```
 
-With `PUBLIC_BASE_URL`, generated report links are returned as:
+`PUBLIC_BASE_URL` is important for ChatGPT web. Without it, the PDF generator can
+create `/tmp/reports/...pdf` inside the Render container, but ChatGPT only sees a
+private container path. With it, the tool response includes:
 
 ```text
 https://YOUR-RENDER-SERVICE.onrender.com/reports/report_name.pdf
 ```
 
-## Workflow reminder
+and `http_server.py` serves that file back over HTTPS.
 
-The report run itself must still be handled by ChatGPT:
+When testing in ChatGPT, the final PDF link must look like:
 
-1. Get search criteria.
-2. Conduct trademark searches, litigation searches & optional web search.
-3. Analyze trademark risk.
-4. Draft report.
-5. Validate and generate final PDF.
+```text
+https://YOUR-RENDER-SERVICE.onrender.com/reports/report_name.pdf
+```
 
-The local MCP server is called only at the validation and rendering gate.
+A link beginning with `https://chatgpt.com/c/...` is only a conversation anchor
+or ChatGPT-created artifact reference. It is not proof that this MCP server
+generated the Clarivate-template PDF.
+
+When ChatGPT or Claude receives the `pdf_url`, it should return that link to the
+user directly. It should not download the PDF, review the generated PDF, or
+attempt to inspect the generated PDF.
+
+## Local Smoke Test
+
+```bash
+python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions/trademark-knockout-report-mcp/server.py" --self-test
+```
+
+HTTP wrapper smoke test:
+
+```bash
+python3 "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-ClarivateAnalytics/Documents/Data Platform/AI Platform/tests/Plugins/MCP - instructions/trademark-knockout-report-mcp/http_server.py" --host 127.0.0.1 --port 8765
+```

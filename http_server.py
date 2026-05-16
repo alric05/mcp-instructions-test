@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""HTTP wrapper for the local trademark knockout report MCP server."""
+"""HTTP wrapper for the trademark knockout MCP server.
+
+ChatGPT web custom MCP apps require a remote HTTP endpoint. This wrapper exposes
+the same tools as server.py over a small stateless JSON-RPC HTTP endpoint that
+can be placed behind a short-lived HTTPS tunnel for testing.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header(
             "Access-Control-Allow-Headers",
             "authorization, content-type, mcp-protocol-version, mcp-session-id",
@@ -65,13 +70,18 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
             )
             return
         if self.path == "/health":
-            self._write_json(200, {"ok": True, "name": SERVER_NAME, "version": SERVER_VERSION})
+            self._write_json(200, {"ok": True, "name": SERVER_NAME})
             return
         if self.path.startswith("/reports/"):
             self._serve_report_file(include_body=True)
             return
         if self.path == "/mcp":
-            self._write_json(405, {"error": "Use POST /mcp with JSON-RPC messages."})
+            self._write_json(
+                405,
+                {
+                    "error": "Use POST /mcp with JSON-RPC messages. This server does not keep a server-to-client event stream open.",
+                },
+            )
             return
         self._write_json(404, {"error": "not found"})
 
@@ -81,46 +91,10 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
             return
         self._send_common_headers(404)
 
-    def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/mcp":
-            self._write_json(404, {"error": "not found"})
-            return
-        if not self._auth_ok():
-            self._write_json(401, {"error": "unauthorized"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length") or "0")
-            raw = self.rfile.read(length).decode("utf-8")
-            payload = json.loads(raw)
-        except Exception as exc:
-            self._write_json(
-                400,
-                {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error", "data": str(exc)}},
-            )
-            return
-        response = self._handle_payload(payload)
-        if response is None:
-            self._send_common_headers(202)
-            return
-        self._write_json(200, response)
-
-    def _handle_payload(self, payload: Any) -> Optional[Any]:
-        if isinstance(payload, list):
-            responses: List[Any] = []
-            for message in payload:
-                response = handle_request(message)
-                if response is not None:
-                    responses.append(response)
-            return responses or None
-        if isinstance(payload, dict):
-            return handle_request(payload)
-        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
-
     def _serve_report_file(self, include_body: bool) -> None:
         if not self._auth_ok():
             self._write_json(401, {"error": "unauthorized"})
             return
-
         relative_url_path = self.path.split("?", 1)[0][len("/reports/") :]
         if not relative_url_path or ".." in relative_url_path.split("/"):
             self._write_json(400, {"error": "invalid report path"})
@@ -153,9 +127,58 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
 
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/mcp":
+            self._write_json(404, {"error": "not found"})
+            return
+        if not self._auth_ok():
+            self._write_json(401, {"error": "unauthorized"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+            raw = self.rfile.read(length).decode("utf-8")
+            payload = json.loads(raw)
+        except Exception as exc:
+            self._write_json(
+                400,
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error", "data": str(exc)}},
+            )
+            return
+
+        try:
+            response = self._handle_payload(payload)
+        except Exception as exc:
+            self._write_json(
+                500,
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "Internal error", "data": str(exc)}},
+            )
+            return
+
+        if response is None:
+            self._send_common_headers(202)
+            return
+        self._write_json(200, response)
+
+    def _handle_payload(self, payload: Any) -> Optional[Any]:
+        if isinstance(payload, list):
+            responses: List[Any] = []
+            for message in payload:
+                response = handle_request(message)
+                if response is not None:
+                    responses.append(response)
+            return responses or None
+        if isinstance(payload, dict):
+            return handle_request(payload)
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Invalid Request"},
+        }
+
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the report renderer MCP server over HTTP.")
+    parser = argparse.ArgumentParser(description="Run the trademark knockout MCP server over HTTP.")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host. Use 127.0.0.1 when tunneling.")
     parser.add_argument("--port", default=8765, type=int, help="Bind port.")
     parser.add_argument("--bearer-token", help="Optional bearer token required in Authorization header.")
