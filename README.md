@@ -102,6 +102,41 @@ For a first smoke test, use a short-lived private tunnel and no auth. Before
 sharing or publishing, put the server behind an authentication mechanism that
 your ChatGPT workspace supports and review the tool actions carefully.
 
+## Deploy On Render
+
+Upload these files with the same relative paths:
+
+```text
+server.py
+http_server.py
+requirements.txt
+assets/Clarivate_template.pdf
+```
+
+Use:
+
+```text
+Build command: pip install -r requirements.txt
+Start command: python3 http_server.py --host 0.0.0.0 --port $PORT
+```
+
+Set environment variables:
+
+```text
+TRADEMARK_REPORT_OUTPUT_DIR=/tmp/reports
+PUBLIC_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com
+```
+
+`PUBLIC_BASE_URL` is important for ChatGPT web. Without it, the PDF generator can
+create `/tmp/reports/...pdf` inside the Render container, but ChatGPT only sees a
+private container path. With it, the tool response includes:
+
+```text
+https://YOUR-RENDER-SERVICE.onrender.com/reports/report_name.pdf
+```
+
+and `http_server.py` serves that file back over HTTPS.
+
 ## Local Smoke Test
 
 ```bash

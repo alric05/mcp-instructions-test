@@ -1010,6 +1010,26 @@ def default_output_dir() -> Path:
     return Path.cwd().resolve()
 
 
+def public_base_url() -> Optional[str]:
+    value = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    if not value:
+        return None
+    return value.rstrip("/")
+
+
+def public_file_url(path: Path) -> Optional[str]:
+    base_url = public_base_url()
+    if not base_url:
+        return None
+    try:
+        resolved = path.resolve()
+        output_dir = default_output_dir()
+        relative = resolved.relative_to(output_dir)
+    except ValueError:
+        return None
+    return f"{base_url}/reports/{relative.as_posix()}"
+
+
 def resolve_output_path(output_path: Optional[str], subject: str) -> Path:
     if output_path:
         path = Path(output_path).expanduser()
@@ -1072,9 +1092,11 @@ def generate_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "pdf_path": str(output_path.resolve()),
+        "pdf_url": public_file_url(output_path),
         "pdf_exists": True,
         "pdf_size_bytes": output_path.stat().st_size,
         "markdown_path": str(markdown_output_path.resolve()) if markdown_output_path else None,
+        "markdown_url": public_file_url(markdown_output_path) if markdown_output_path else None,
         "template_path": str(template_path.resolve()),
     }
 

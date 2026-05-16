@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
-from server import SERVER_NAME, SERVER_VERSION, TOOLS, handle_request
+from server import SERVER_NAME, SERVER_VERSION, TOOLS, default_output_dir, handle_request
 
 
 SESSION_ID = str(uuid.uuid4())
@@ -70,6 +72,9 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._write_json(200, {"ok": True, "name": SERVER_NAME})
             return
+        if self.path.startswith("/reports/"):
+            self._serve_report_file(include_body=True)
+            return
         if self.path == "/mcp":
             self._write_json(
                 405,
@@ -79,6 +84,48 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
             )
             return
         self._write_json(404, {"error": "not found"})
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        if self.path.startswith("/reports/"):
+            self._serve_report_file(include_body=False)
+            return
+        self._send_common_headers(404)
+
+    def _serve_report_file(self, include_body: bool) -> None:
+        if not self._auth_ok():
+            self._write_json(401, {"error": "unauthorized"})
+            return
+        relative_url_path = self.path.split("?", 1)[0][len("/reports/") :]
+        if not relative_url_path or ".." in relative_url_path.split("/"):
+            self._write_json(400, {"error": "invalid report path"})
+            return
+
+        output_dir = default_output_dir()
+        file_path = (output_dir / relative_url_path).resolve()
+        try:
+            file_path.relative_to(output_dir)
+        except ValueError:
+            self._write_json(400, {"error": "invalid report path"})
+            return
+        if not file_path.exists() or not file_path.is_file():
+            self._write_json(404, {"error": "report not found"})
+            return
+
+        content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(file_path.stat().st_size))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Disposition", f'inline; filename="{file_path.name}"')
+        self.end_headers()
+        if not include_body:
+            return
+        with file_path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 64)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/mcp":
