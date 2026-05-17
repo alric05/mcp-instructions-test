@@ -10,12 +10,14 @@ existing Clarivate CompuMark MCP connector.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
@@ -61,6 +63,16 @@ SUPPORTED_RISK_LABELS = RISK_LABELS | {
     "🟠 Medio",
     "🔴 Alto",
 }
+
+EVIDENCE_STATUSES = {"searched_results_found", "searched_no_results_found", "not_searched"}
+REQUIRED_EVIDENCE_STEPS = {
+    "compumark_identical_knockout": "CompuMark identical knockout",
+    "compumark_custom_screening": "CompuMark custom/screening",
+    "goods_services_review": "Goods/services review",
+    "litigation_search": "Litigation search",
+    "public_web_search": "Public web search",
+}
+VALIDATION_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
 EU_COUNTRY_OFFICES = {
     "AT",
@@ -151,6 +163,8 @@ litigation data must come from the connected Clarivate CompuMark MCP tools.
 6. Query litigation with the Clarivate litigation-search MCP tool.
 7. Run online-presence search by default using ChatGPT's or Claude's own
    browsing/web-search capability. Skip it only if the user explicitly opts out.
+   Do not draft online-presence conclusions unless the web search is evidenced
+   in the required search evidence checklist.
 8. Draft the report with the exact report structure returned by
    get_trademark_knockout_report_template. Top 5 tables must contain exactly
    five rows; use a localized equivalent of "No further material source-backed
@@ -186,6 +200,37 @@ If the PDF tool does not return a pdf_url, state that no public download URL is
 available.
 If the only available link is a chatgpt.com/c conversation link, that is not the
 generated report PDF and must be treated as a failed public-download handoff.
+
+## Required evidence checklist
+
+Before drafting the report, build a search evidence checklist with exactly these
+steps:
+
+- `compumark_identical_knockout`
+- `compumark_custom_screening`
+- `goods_services_review`
+- `litigation_search`
+- `public_web_search`
+
+Each step must have one status:
+
+- `searched_results_found`
+- `searched_no_results_found`
+- `not_searched`
+
+Use `searched_no_results_found` only when the relevant search or review actually
+ran and produced no material source-backed findings. Use `not_searched` when the
+step did not run. Do not phrase an unsearched section as "no findings" or "no
+material findings"; say that it was not performed and draw no conclusion from
+that source.
+
+The `validate_trademark_knockout_report` tool requires this evidence checklist
+and returns a `validation_id` only if the checklist and report text are
+consistent. The `generate_clarivate_report_pdf` tool requires that
+`validation_id`. Do not generate the PDF until validation succeeds.
+
+The final answer and report must include a source/procedure audit trail table
+showing these steps and whether each was completed or not performed.
 
 ## Data collection rules
 
@@ -263,6 +308,16 @@ Date of report: [DATE]
 | Match scope         | [Exact only / Contains / Phonetic / Plurals]  |
 | Notes / assumptions | [Any limitations, exclusions, or assumptions] |
 
+### 1.1 Source / Procedure Audit Trail
+
+| Step                         | Status                                      | Evidence / Notes |
+| ---------------------------- | ------------------------------------------- | ---------------- |
+| CompuMark identical knockout | [Completed - results found / Completed - no material findings / Not performed] | [Tool call/result count/error note] |
+| CompuMark custom/screening   | [Completed - results found / Completed - no material findings / Not performed] | [Tool call/result count/error note] |
+| Goods/services review        | [Completed - results found / Completed - no material findings / Not performed] | [Content/goods reviewed or not performed reason] |
+| Litigation search            | [Completed - results found / Completed - no material findings / Not performed] | [Tool call/result count/error note] |
+| Public web search            | [Completed - results found / Completed - no material findings / Not performed] | [Browser/search sources reviewed or not performed reason] |
+
 ---
 
 ## 2. CompuMark Search Results
@@ -309,9 +364,9 @@ Date of report: [DATE]
 
 | Item                         | Result               |
 | ---------------------------- | -------------------- |
-| Exact same name found online | [Yes / No / Limited / Not performed (user opted out)] |
-| Similar names found online   | [Yes / No / Not performed (user opted out)]           |
-| Commercial use observed      | [Yes / No / Limited / Not performed (user opted out)] |
+| Exact same name found online | [Yes / No after searched / Limited / Not performed] |
+| Similar names found online   | [Yes / No after searched / Limited / Not performed] |
+| Commercial use observed      | [Yes / No after searched / Limited / Not performed] |
 
 ### 3.2 Most Relevant Web Findings (Top 5)
 
@@ -328,7 +383,7 @@ Date of report: [DATE]
 * [State whether the searched name appears to be in active commercial use online.]
 * [State whether similar names create practical marketplace overlap.]
 * [State whether any domain or branding conflicts are notable.]
-* [If web search was not run, state: "Online presence search not performed (user opted out)."]
+* [If web search was not run, state: "Online presence search was not performed; no conclusion is drawn from online presence."]
 
 ---
 
@@ -486,6 +541,8 @@ def get_report_template(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "Localize visible headings, metadata labels, table headers, enum values, and disclaimer text.",
             "Top 5 tables must contain exactly five data rows.",
             "Use only source-backed facts. Fill empty Top 5 rows with a localized equivalent of 'No further material source-backed finding'.",
+            "Include the Source / Procedure Audit Trail and align it with the search_evidence checklist used for validation.",
+            "Distinguish 'searched and no material findings' from 'not searched'. Never use 'no findings' wording for a section that was not searched.",
             "Use only 🟢 Low, 🟠 Medium, or 🔴 High for risk statements.",
             "Display only domains as link text while embedding full absolute URLs.",
         ],
@@ -659,6 +716,26 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 else "Online presence search skipped because the user opted out."
             ),
         },
+        "required_search_evidence_checklist": {
+            "allowed_statuses": sorted(EVIDENCE_STATUSES),
+            "steps": [
+                {
+                    "key": key,
+                    "label": label,
+                    "required_for_clearance_conclusion": key != "public_web_search" or web_enabled,
+                    "not_searched_allowed_only_if": (
+                        "the user explicitly opted out of online presence search"
+                        if key == "public_web_search"
+                        else "not allowed for this required step"
+                    ),
+                }
+                for key, label in REQUIRED_EVIDENCE_STEPS.items()
+            ],
+            "validation_rule": (
+                "Call validate_trademark_knockout_report with search_evidence before PDF generation. "
+                "The validator returns validation_id only when required evidence is present and report wording distinguishes not searched from no findings."
+            ),
+        },
         "post_collection": [
             "Merge Route A and Route B IDs and de-duplicate.",
             "Retrieve trademark details for no more than 100 IDs per content call.",
@@ -696,6 +773,140 @@ def count_markdown_table_data_rows(table_lines: List[str]) -> int:
     return max(0, len(rows) - 1)
 
 
+def markdown_sha256(markdown_text: str) -> str:
+    return hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
+
+
+def section_text(markdown_text: str, start_heading: str, next_heading: str) -> str:
+    lowered = markdown_text.lower()
+    start = lowered.find(start_heading.lower())
+    if start < 0:
+        return ""
+    next_start = lowered.find(next_heading.lower(), start + len(start_heading))
+    if next_start < 0:
+        return markdown_text[start:]
+    return markdown_text[start:next_start]
+
+
+def has_step_proof(step: Dict[str, Any]) -> bool:
+    proof_keys = [
+        "evidence",
+        "evidence_summary",
+        "tool_call",
+        "tool_call_id",
+        "source",
+        "sources",
+        "source_urls",
+        "result_count",
+        "completed_at",
+    ]
+    for key in proof_keys:
+        value = step.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (int, float)):
+            return True
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def evidence_audit_rows(search_evidence: Dict[str, Any]) -> List[Dict[str, str]]:
+    rows = []
+    for key, label in REQUIRED_EVIDENCE_STEPS.items():
+        step = search_evidence.get(key) or {}
+        if not isinstance(step, dict):
+            step = {}
+        status = str(step.get("status", "")).strip()
+        if status == "searched_results_found":
+            display_status = "Completed - results found"
+        elif status == "searched_no_results_found":
+            display_status = "Completed - no material findings"
+        elif status == "not_searched":
+            display_status = "Not performed"
+        else:
+            display_status = "Missing or invalid"
+        notes = (
+            str(step.get("evidence") or step.get("evidence_summary") or step.get("not_searched_reason") or "")
+            .strip()
+        )
+        rows.append({"step": label, "status": display_status, "notes": notes})
+    return rows
+
+
+def validate_search_evidence(markdown_text: str, arguments: Dict[str, Any], issues: List[str], warnings: List[str]) -> Dict[str, Any]:
+    search_evidence = arguments.get("search_evidence")
+    if not isinstance(search_evidence, dict):
+        issues.append("Missing required search_evidence checklist.")
+        return {}
+
+    public_web_opted_out = bool(
+        arguments.get("public_web_search_explicitly_opted_out")
+        or search_evidence.get("public_web_search_explicitly_opted_out")
+    )
+
+    for key, label in REQUIRED_EVIDENCE_STEPS.items():
+        step = search_evidence.get(key)
+        if not isinstance(step, dict):
+            issues.append(f"Missing search evidence step: {key} ({label}).")
+            continue
+        status = str(step.get("status", "")).strip()
+        if status not in EVIDENCE_STATUSES:
+            issues.append(
+                f"Invalid or missing status for {key}. Use one of: {', '.join(sorted(EVIDENCE_STATUSES))}."
+            )
+            continue
+
+        if status in {"searched_results_found", "searched_no_results_found"} and not has_step_proof(step):
+            issues.append(f"{key} is marked searched but has no evidence, source, tool-call note, result count, or timestamp.")
+
+        if status == "not_searched":
+            reason = str(step.get("not_searched_reason", "")).strip()
+            if not reason:
+                issues.append(f"{key} is marked not_searched but has no not_searched_reason.")
+            if key == "public_web_search":
+                step_opted_out = bool(step.get("user_opted_out") or step.get("explicitly_opted_out"))
+                if not (public_web_opted_out or step_opted_out):
+                    issues.append("public_web_search may be not_searched only when the user explicitly opted out.")
+            else:
+                issues.append(f"{key} is required and may not be marked not_searched.")
+
+    audit_table_lines = table_lines_after_heading(markdown_text, "### 1.1 Source / Procedure Audit Trail")
+    if count_markdown_table_data_rows(audit_table_lines) < len(REQUIRED_EVIDENCE_STEPS):
+        issues.append("Source / Procedure Audit Trail must include one row for each required evidence step.")
+
+    lowered = markdown_text.lower()
+    for label in REQUIRED_EVIDENCE_STEPS.values():
+        if label.lower() not in lowered:
+            warnings.append(f"Audit trail may be missing visible row label: {label}.")
+
+    public_web_step = search_evidence.get("public_web_search") if isinstance(search_evidence, dict) else {}
+    public_web_status = public_web_step.get("status") if isinstance(public_web_step, dict) else None
+    web_section = section_text(markdown_text, "## 3. Online Presence Search", "## 4. Key Takeaways").lower()
+    if public_web_status == "not_searched":
+        if "not performed" not in web_section:
+            issues.append("Online presence section must state 'not performed' when public_web_search was not searched.")
+        misleading_no_finding_terms = [
+            "no material online finding",
+            "no online finding",
+            "no findings",
+            "no source-backed conflicts",
+            "did not identify",
+        ]
+        for term in misleading_no_finding_terms:
+            if term in web_section:
+                issues.append(
+                    "Online presence section implies absence of findings even though public_web_search was not searched."
+                )
+                break
+    elif public_web_status == "searched_results_found":
+        no_further_count = web_section.count("no further material source-backed finding")
+        if no_further_count >= 5:
+            issues.append("public_web_search is marked results found, but the Top 5 web table appears to contain no findings.")
+
+    return search_evidence
+
+
 def validate_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
     text = arguments.get("markdown") or arguments.get("markdown_text") or ""
     if not text.strip():
@@ -704,6 +915,7 @@ def validate_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     required_sections = [
         "## 1. Search Criteria",
+        "### 1.1 Source / Procedure Audit Trail",
         "## 2. CompuMark Search Results",
         "### 2.1 Summary",
         "### 2.2 Most Relevant Trademark References (Top 5)",
@@ -745,7 +957,30 @@ def validate_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
             elif expected_domain and label not in {expected_domain, "full-text"} and "." in expected_domain:
                 warnings.append(f"Check link label '{label}' for URL {url}; preferred visible text is '{expected_domain}'.")
 
-    return {"valid": not issues, "issues": issues, "warnings": warnings}
+    search_evidence = validate_search_evidence(text, arguments, issues, warnings)
+    checksum = markdown_sha256(text)
+    validation_id = None
+    if not issues:
+        validation_id = f"validation_{uuid.uuid4().hex}"
+        VALIDATION_REGISTRY[validation_id] = {
+            "markdown_sha256": checksum,
+            "search_evidence": search_evidence,
+            "audit_rows": evidence_audit_rows(search_evidence),
+        }
+
+    return {
+        "valid": not issues,
+        "issues": issues,
+        "warnings": warnings,
+        "validation_id": validation_id,
+        "markdown_sha256": checksum,
+        "audit_rows": evidence_audit_rows(search_evidence) if search_evidence else [],
+        "pdf_generation_gate": (
+            "Pass validation_id to generate_clarivate_report_pdf. Do not generate the PDF without it."
+            if validation_id
+            else "Blocked: fix validation issues before PDF generation."
+        ),
+    }
 
 
 def require_pdf_dependencies() -> None:
@@ -1059,6 +1294,13 @@ def resolve_output_path(output_path: Optional[str], subject: str) -> Path:
 
 def generate_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
     require_pdf_dependencies()
+    validation_id = str(arguments.get("validation_id") or "").strip()
+    if not validation_id:
+        raise ValueError("validation_id is required. Call validate_trademark_knockout_report successfully before PDF generation.")
+    validation_record = VALIDATION_REGISTRY.get(validation_id)
+    if not validation_record:
+        raise ValueError("validation_id is unknown or expired. Re-run validate_trademark_knockout_report and pass the returned validation_id.")
+
     subject = clean_mark(arguments.get("subject") or arguments.get("mark") or "")
     if not subject:
         raise ValueError("subject is required.")
@@ -1074,6 +1316,9 @@ def generate_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
         markdown_text = markdown_path.read_text(encoding="utf-8")
     if markdown_text is None or not str(markdown_text).strip():
         raise ValueError("markdown or markdown_path is required.")
+    current_checksum = markdown_sha256(str(markdown_text))
+    if validation_record.get("markdown_sha256") != current_checksum:
+        raise ValueError("Markdown content does not match the validated report. Re-run validation with the exact markdown before PDF generation.")
 
     template_path = Path(arguments.get("template_path") or DEFAULT_TEMPLATE_PATH).expanduser()
     if not template_path.is_absolute():
@@ -1117,6 +1362,8 @@ def generate_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "markdown_url": markdown_url,
         "template_path": str(template_path.resolve()),
         "pdf_generation_workflow": "Clarivate template merge: template cover + generated report body + template closing page",
+        "validation_id": validation_id,
+        "audit_rows": validation_record.get("audit_rows", []),
         "chatgpt_final_response_instruction": (
             "Use download_the_report/pdf_url as the only PDF link. Do not create or link a ChatGPT-generated PDF artifact. "
             "Do not fetch, open, download, inspect, or review the PDF URL; give the link directly to the user. "
@@ -1178,22 +1425,48 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "handler": build_execution_plan,
     },
     "validate_trademark_knockout_report": {
-        "description": "Check the drafted report against the required section, Top 5 row, link-label, and risk-label gates before PDF generation.",
+        "description": "Check the drafted report against required format and evidence gates. Returns validation_id required for PDF generation.",
         "inputSchema": {
             "type": "object",
-            "required": ["markdown"],
-            "properties": {"markdown": {"type": "string", "description": "Final report markdown to validate."}},
+            "required": ["markdown", "search_evidence"],
+            "properties": {
+                "markdown": {"type": "string", "description": "Final report markdown to validate."},
+                "search_evidence": {
+                    "type": "object",
+                    "description": "Evidence checklist proving required searches/reviews were performed before drafting.",
+                    "properties": {
+                        "compumark_identical_knockout": {"type": "object", "description": "Status and proof for identical knockout search."},
+                        "compumark_custom_screening": {"type": "object", "description": "Status and proof for custom/screening search."},
+                        "goods_services_review": {"type": "object", "description": "Status and proof for goods/services review."},
+                        "litigation_search": {"type": "object", "description": "Status and proof for litigation search."},
+                        "public_web_search": {"type": "object", "description": "Status and proof for public web search."},
+                        "public_web_search_explicitly_opted_out": {
+                            "type": "boolean",
+                            "description": "Set true only when the user explicitly opted out of online-presence search.",
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+                "public_web_search_explicitly_opted_out": {
+                    "type": "boolean",
+                    "description": "Set true only when the user explicitly opted out of online-presence search.",
+                },
+            },
             "additionalProperties": False,
         },
         "handler": validate_report,
     },
     "generate_clarivate_report_pdf": {
-        "description": "Generate the final Clarivate-template PDF from finalized report markdown using the bundled template asset.",
+        "description": "Generate the final Clarivate-template PDF from validated report markdown using the bundled template asset.",
         "inputSchema": {
             "type": "object",
-            "required": ["subject"],
+            "required": ["subject", "validation_id"],
             "properties": {
                 "subject": {"type": "string", "description": "Cover subtitle, usually the searched mark."},
+                "validation_id": {
+                    "type": "string",
+                    "description": "Validation id returned by validate_trademark_knockout_report for this exact markdown.",
+                },
                 "markdown": {"type": "string", "description": "Finalized report markdown text."},
                 "markdown_path": {"type": "string", "description": "Path to finalized report markdown, used if markdown is not supplied."},
                 "output_path": {
