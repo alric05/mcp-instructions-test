@@ -511,6 +511,12 @@ def build_trademark_search_calls(normalized: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def next_step_reminder(next_step: Optional[str]) -> str:
+    if next_step:
+        return f"After this step is complete, call continue_workflow with step_id '{next_step}'."
+    return "This is the final workflow step; do not call continue_workflow again."
+
+
 def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_result: Any) -> Dict[str, Any]:
     next_step = next_workflow_step_id(step_id)
     if step_id == "criteria":
@@ -521,6 +527,7 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
                     "Ask for the first missing required input only.",
                     "Required: mark, jurisdiction/office, Nice class.",
                     "Defaults: exact match; web search on unless opted out.",
+                    next_step_reminder(step_id),
                 ],
                 "missing": missing,
                 "success_criteria": "One missing input is requested from the user; no search is run yet.",
@@ -532,6 +539,7 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
             "instructions": [
                 "Keep the mark wording exact.",
                 "Move on once mark, jurisdiction/office, and Nice class are known.",
+                next_step_reminder(next_step),
             ],
             "criteria": normalized_criteria_snapshot(criteria),
             "success_criteria": "Required criteria are complete and normalized enough to build the plan.",
@@ -546,6 +554,7 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
                 "Call build_trademark_knockout_execution_plan.",
                 "Use it only to normalize scope and confirm the sequence.",
                 "Do not run searches until the collect step.",
+                next_step_reminder(next_step),
             ],
             "output": "execution_plan",
             "success_criteria": "Compact plan is available; agent still needs the collect step for concrete tool arguments.",
@@ -568,6 +577,7 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
                 "instructions": [
                     "Complete the criteria and plan steps before collecting evidence.",
                     "Pass search_criteria or previous_step_result.normalized_inputs into continue_workflow.",
+                    next_step_reminder("criteria"),
                 ],
                 "error": str(exc),
                 "next_step_id": "criteria",
@@ -581,6 +591,7 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
                 "Fetch content and full-text URLs for Top 5 only.",
                 "Do not call trademark-goods unless the user requested goods/spec details.",
                 "Run planned litigation searches and web search unless opted out.",
+                next_step_reminder(next_step),
             ],
             "normalized_inputs": normalized,
             "trademark_searches": trademark_searches,
@@ -603,6 +614,7 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
                 "Call get_trademark_knockout_report_template and draft to that structure.",
                 "Keep Top 5 tables at exactly five rows.",
                 "Use full-text labels for CompuMark links and domains for web links.",
+                next_step_reminder(next_step),
             ],
             "output": "report_markdown",
             "success_criteria": "Markdown report is source-backed, complete, and ready for validation.",
@@ -617,6 +629,7 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
                 "Validate the markdown; fix issues before rendering.",
                 "Generate the Clarivate-template PDF.",
                 "Return a concise final answer with the generated pdf_url/download_the_report link.",
+                next_step_reminder(None),
             ],
             "output": "final response",
             "success_criteria": "Validation passes, PDF tool is called, final answer uses the returned PDF URL or states no public URL is configured.",
@@ -692,6 +705,15 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "Top 5 only for content/full-text",
             "skip trademark-goods unless requested",
         ],
+        "workflow_protocol": {
+            "how_to_continue": "Do not treat this plan as complete instructions. Call continue_workflow with next_step_id.",
+            "next_steps": [
+                "collect: get concrete CompuMark/web-search instructions and arguments",
+                "report: analyze evidence and draft markdown",
+                "deliver: validate, generate PDF, and respond",
+            ],
+            "completion_rule": "The workflow is complete only after the deliver step returns done=true and the PDF result is handed to the user.",
+        },
         "next_step_id": "collect",
         "next_tool_to_call": "continue_workflow",
     }
@@ -1211,6 +1233,7 @@ EXECUTION_PLAN_OUTPUT_SCHEMA = {
         "normalized_inputs": OBJECT_SCHEMA,
         "sequence": STRING_ARRAY_SCHEMA,
         "collection_rules": STRING_ARRAY_SCHEMA,
+        "workflow_protocol": OBJECT_SCHEMA,
         "next_step_id": {"type": "string"},
         "next_tool_to_call": {"type": "string"},
     },

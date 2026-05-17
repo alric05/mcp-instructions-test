@@ -56,6 +56,8 @@ python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-
 `build_trademark_knockout_execution_plan` is intentionally not enough to run the
 whole report. It normalizes scope and points back to `continue_workflow`. The
 `collect` step returns the concrete trademark-search arguments for that step.
+Every non-final `continue_workflow` response ends with a reminder to call
+`continue_workflow` again with the returned `next_step_id`.
 
 The current linear workflow is:
 
