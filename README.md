@@ -55,27 +55,13 @@ python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-
    - full-text URL creation;
    - litigation/caselaw search.
 5. Run the online-presence check by default using ChatGPT's or Claude's own
-   browsing/web-search capability. Skip it only if the user explicitly opts out.
-   Choose relevant searches dynamically from the mark, territories, classes,
-   goods/services context, and discovered results; do not follow fixed query
-   patterns from the MCP plan.
-6. Build a search evidence checklist before drafting. Each required step must be
-   `searched_results_found`, `searched_no_results_found`, or `not_searched`.
-   The required steps are:
-   - `compumark_identical_knockout`
-   - `compumark_custom_screening`
-   - `goods_services_review`
-   - `litigation_search`
-   - `public_web_search`
-7. Draft the report with `get_trademark_knockout_report_template`, including the
-   Source / Procedure Audit Trail. Do not state "no findings" for any section
-   that is actually `not_searched`.
-8. Call `validate_trademark_knockout_report` with both the markdown and
-   `search_evidence`. It returns `validation_id` only when required evidence and
-   report wording pass.
-9. Call `generate_clarivate_report_pdf` with the exact same markdown and the
-   returned `validation_id`. PDF generation is blocked without that id.
-10. Give the user the `download_the_report`/`pdf_url` returned by
+   browsing/web-search capability. Use the plain instruction: `What do you find
+   online related to "<MARK>"? Return the 5 most relevant results.` Skip it only
+   if the user explicitly opts out.
+6. Draft the report with `get_trademark_knockout_report_template`.
+7. Call `validate_trademark_knockout_report`.
+8. Call `generate_clarivate_report_pdf`.
+9. Give the user the `download_the_report`/`pdf_url` returned by
    `generate_clarivate_report_pdf`. Do not fetch, open, download, inspect, or
    review the final PDF URL.
 
