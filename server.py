@@ -189,11 +189,11 @@ Date of report: [DATE]
 
 | Verbal Element     | Status   | Registration Office | Class(es) | Number   | Date   | Owner   | Full Text URL   |
 | ------------------ | -------- | ------------------- | --------- | -------- | ------ | ------- | --------------- |
-| [VERBAL ELEMENT 1] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
-| [VERBAL ELEMENT 2] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
-| [VERBAL ELEMENT 3] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
-| [VERBAL ELEMENT 4] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
-| [VERBAL ELEMENT 5] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [domain.tld](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 1] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [full-text](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 2] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [full-text](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 3] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [full-text](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 4] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [full-text](FULL_TEXT_URL) |
+| [VERBAL ELEMENT 5] | [Status] | [OFFICE]            | [CLASS]   | [NUMBER] | [DATE] | [OWNER] | [full-text](FULL_TEXT_URL) |
 
 ### 2.3 Litigation Activity
 
@@ -357,12 +357,12 @@ def phonetic_args(phonetics: bool) -> Dict[str, bool]:
     }
 
 
-def build_trademark_search_base_args(offices: List[str], limit_wo: bool) -> Dict[str, Any]:
+def build_trademark_search_base_args(offices: List[str], limit_wo: bool, plurals: bool) -> Dict[str, Any]:
     return {
         "activeOnly": False,
         "crossReferences": True,
         "limitWOresultsToDesignated": limit_wo,
-        "plurals": True,
+        "plurals": plurals,
         "registrationOfficeCodes": offices,
         **phonetic_args(False),
     }
@@ -476,13 +476,14 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
     if step_id == "collect":
         return {
             "instructions": [
-                "Run the planned CompuMark trademark and litigation searches.",
-                "De-duplicate IDs; keep route counts and errors.",
-                "Fetch details and full-text URLs for likely top records.",
-                "Run the planned web search unless opted out.",
+                "Run exact trademark-search first; run broad trademark-search only if exact returns 5 or fewer records.",
+                "Prioritize exact results, then broad results; select Top 5 before follow-up calls.",
+                "Fetch content and full-text URLs for Top 5 only.",
+                "Do not call trademark-goods unless the user requested goods/spec details.",
+                "Run planned litigation searches and web search unless opted out.",
             ],
             "output": "evidence",
-            "success_criteria": "Evidence set includes route counts, source records, litigation results, web findings or opt-out note, and errors if any.",
+            "success_criteria": "Evidence includes Top 5 trademark content/full-text links, search counts, litigation results, web findings or opt-out note, and errors if any.",
             "next_step_id": next_step,
             "next_tool_to_call": "continue_workflow",
             "done": False,
@@ -579,58 +580,33 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
     else:
         web_enabled = bool(web_pref)
 
-    route_a = {
-        "tool_purpose": "identical knockout trademark search",
-        "arguments": {
-            "trademarkName": mark,
-            "registrationOfficeCodes": offices,
-            "classes": nice_classes,
-            "limitWOresultsToDesignated": limit_wo,
-        },
+    exact_search_args = {
+        **build_trademark_search_base_args(offices, limit_wo, plurals=False),
+        "crossReferences": False,
+        "searchFields": [
+            {
+                "name": "EXACT_WORD_MARK_SPECIFICATION",
+                "operator": "CONTAINS",
+                "value": mark,
+            }
+        ],
     }
-
-    route_b_base_args = build_trademark_search_base_args(offices, limit_wo)
-    class_search_field_template = [
-        {"name": "WORD_MARK_SPECIFICATION", "operator": "CONTAINS", "value": mark},
-        {"name": "INT_CLASS_NUMBER", "operator": "EQUALS", "value": "{nice_class}"},
-    ]
-    route_b_stages = [
-        {
-            "stage": "B1",
-            "run_when": "always",
-            "stop_if_usable": True,
-            "argument_delta": {
-                "searchFields": [
-                    {
-                        "name": "EXACT_WORD_MARK_SPECIFICATION",
-                        "operator": "CONTAINS",
-                        "value": mark,
-                    }
-                ]
-            },
-        },
-        {
-            "stage": "B2",
-            "run_when": "B1 returned 0 usable results",
-            "repeat_for_nice_classes": nice_classes,
-            "argument_delta_template": {"searchFields": class_search_field_template},
-        },
-        {
-            "stage": "B3",
-            "run_when": "B2 for that Nice class returned 0 usable results",
-            "repeat_for_nice_classes": nice_classes,
-            "argument_delta_template": {
-                **phonetic_args(True),
-                "searchFields": class_search_field_template,
-            },
-        },
-    ]
+    broad_search_args = {
+        **build_trademark_search_base_args(offices, limit_wo, plurals=True),
+        **phonetic_args(True),
+        "searchFields": [
+            {
+                "name": "WORD_MARK_SPECIFICATION",
+                "operator": "CONTAINS",
+                "value": mark,
+            }
+        ],
+    }
 
     return {
         "search_statement": (
-            f"Search {mark} in {', '.join(offices)} for Nice class(es) "
-            f"{', '.join(nice_classes)}, using {match_scope} matching, reviewing active and inactive records "
-            "with default broad screening settings."
+            f"Search {mark} in {', '.join(offices)} for Nice class(es) {', '.join(nice_classes)}. "
+            "Use exact trademark-search first; broad trademark-search only if exact returns 5 or fewer records."
         ),
         "normalized_inputs": {
             "mark": mark,
@@ -641,14 +617,18 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "web_search_enabled": web_enabled,
             "mapping_notes": mapping_notes,
         },
-        "trademark_route_a": route_a,
-        "trademark_route_b": {
-            "tool_purpose": "custom/screening trademark search",
-            "base_arguments": route_b_base_args,
-            "stages": route_b_stages,
-            "call_instruction": "Merge base_arguments with stage delta/template; replace {nice_class}.",
-            "stop_rule": "Stop after useful stage or >100 results.",
-            "reporting": "Record counts, errors, and working stage.",
+        "trademark_searches": {
+            "tool_purpose": "trademark-search/custom screening trademark search",
+            "exact_first": {
+                "run_when": "always",
+                "arguments": exact_search_args,
+            },
+            "broad_second": {
+                "run_when": "only if exact_first returns 5 or fewer records",
+                "arguments": broad_search_args,
+            },
+            "ranking": "Exact results have priority; fill remaining Top 5 slots from broad results.",
+            "follow_up": "Fetch content and full-text links for Top 5 only; do not call trademark-goods unless user requested goods/spec details.",
         },
         "litigation": {
             "goal": "opposition checks for top owners and marks",
@@ -664,7 +644,7 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
             ),
             "source": "agent browsing/web search, not CompuMark",
         },
-        "post_collection": "De-duplicate IDs; fetch details in batches <=100; create full-text URLs for top records.",
+        "post_collection": "De-duplicate IDs; select Top 5; fetch content/full-text for Top 5 only; skip goods unless requested.",
     }
 
 

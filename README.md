@@ -61,11 +61,17 @@ criteria
 
 The workflow tool coordinates the process; specialist tools carry the detail.
 During these steps, use the existing CompuMark MCP connector tools by purpose:
-   - identical knockout trademark search;
-   - custom/screening trademark search;
-   - trademark content/details lookup;
-   - full-text URL creation;
+   - trademark-search/custom screening search;
+   - trademark content/details lookup for the Top 5 only;
+   - full-text URL creation for the Top 5 only;
    - litigation/caselaw search.
+
+Do not use the identical knockout search tool. Run an exact trademark-search
+first, without phonetics or plurals. If that search returns more than five
+records, skip the broad search. Otherwise run one broad trademark-search with
+phonetics/plurals enabled. Exact-search results have priority over broad-search
+results. Do not call the trademark-goods tool unless the user specifically asks
+for goods/specification details.
 
 Run online-presence checks by default using ChatGPT's or Claude's own
 browsing/web-search capability. Skip them only if the user explicitly opts out.
