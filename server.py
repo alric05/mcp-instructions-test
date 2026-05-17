@@ -128,123 +128,28 @@ WORKFLOW_INSTRUCTIONS = """# Trademark Knockout Workflow Instructions
 Use these instructions instead of Codex plugin skills. Live trademark and
 litigation data must come from the connected Clarivate CompuMark MCP tools.
 
-## Required visible behavior
+## Essential workflow
 
-1. Detect the user's language from the prompt and use it for visible headings,
-   labels, table headers, status values, summaries, and final report text. Do
-   not translate tool names, IDs, URLs, registration numbers, or mark verbal
-   elements from source records.
-2. Display a localized **Planned Steps** block exactly once before Step 1:
-   1. Get search criteria
-   2. Conduct trademark searches, litigation searches & online-presence search
-   3. Analyze trademark risk
-   4. Draft report
-   5. Generate final PDF
-3. Ask only for missing required inputs, one at a time: mark name, jurisdiction
-   or registration office, and Nice class. Do not ask for online-presence
-   preference unless the user explicitly raises it.
-4. Use only the mark wording provided by the user. Do not add unrequested
-   variations. Use exact matching unless the user explicitly asks for containing
-   matches.
-5. Query trademark data through both routes: identical knockout search and
-   custom/screening trademark search.
-6. Query litigation with the Clarivate litigation-search MCP tool.
-7. Run online-presence search by default using ChatGPT's or Claude's own
-   browsing/web-search capability. Use this instruction: `What do you find
-   online related to "<MARK>"? Return the 5 most relevant results.` Skip it only
-   if the user explicitly opts out.
-8. Draft the report with the exact report structure returned by
-   get_trademark_knockout_report_template. Top 5 tables must contain exactly
-   five rows; use a localized equivalent of "No further material source-backed
-   finding" for empty rows.
-9. Generate the final PDF only with generate_clarivate_report_pdf. Do not create
-   a ChatGPT/native PDF artifact, do not export markdown to PDF yourself, and do
-   not link to a chatgpt.com conversation anchor as the report PDF.
-10. In the final response, the "Download the report" link must be the pdf_url
-   returned by generate_clarivate_report_pdf. The URL must be an HTTPS /reports/
-   URL from this MCP server, for example
-   https://example.onrender.com/reports/report_name.pdf. If pdf_url is null or
-   missing, state that the PDF was generated inside the server but no public
-   download URL is configured. Do not fetch, open, download, inspect, or review
-   the pdf_url; return the link to the user as-is.
-
-## Step summary behavior
-
-After Steps 1, 2, 3, and 4, display exactly this localized three-bullet block:
-
-**Step X Summary**
-- **Completed:** ...
-- **Key findings:** ...
-- **Next:** ...
-
-After Step 5, before the report, display a markdown blockquote:
-
-> **Final Summary Before Report**
-> - **Overall risk view:** exactly one of 🟢 Low / 🟠 Medium / 🔴 High
-> - **Top conflicts:** concise source-backed list or none identified
-> - **Deliverable status:** Report text complete; PDF URL returned: [filename or URL].
-
-If the PDF tool does not return a pdf_url, state that no public download URL is
-available.
-If the only available link is a chatgpt.com/c conversation link, that is not the
-generated report PDF and must be treated as a failed public-download handoff.
-
-## Data collection rules
-
-- Use broad default settings unless the user asks otherwise: active_only false,
-  plurals true, phonetics false for narrow stages, cross-references true, and
-  supported regional phonetics true when controlled broadening calls for it.
-- If a specific country is specified, include that office and WO with
-  limitWOresultsToDesignated true.
-- If an EU country is specified, include that office, EM, and WO with
-  limitWOresultsToDesignated true.
-- If the EU/EUIPO is specified, include EM and WO with
-  limitWOresultsToDesignated true.
-- Never query details for more than 100 trademark IDs per content call.
-- Merge IDs from both trademark routes, de-duplicate, keep per-route counts, and
-  record route-specific errors.
-
-## Route A: identical knockout search
-
-Call the CompuMark identical knockout search tool with the proposed mark,
-registration office scope, Nice classes, and WO-designation flag.
-
-## Route B: custom/screening trademark search
-
-Run a progressive sequence and stop as soon as the result set is useful:
-
-- B1: EXACT_WORD_MARK_SPECIFICATION CONTAINS searched mark. Do not add class
-  filtering. If results are found, use this as the primary exact-match set.
-- B2: if B1 is zero, WORD_MARK_SPECIFICATION CONTAINS searched mark AND
-  INT_CLASS_NUMBER EQUALS requested class. Start with phonetics false.
-- B3: if B2 is zero, keep the class filter and set phonetics true.
-
-Stop broadening when any stage returns 5 to 100 results. If a stage returns more
-than 100 results, do not run broader stages; trim by relevance during analysis.
-
-## Litigation rules
-
-- Always include FIRST_ACTION_TYPE EQ OPPOSITION.
-- Prefer CASE_DOMAIN EQ TRADEMARK when available.
-- Avoid OR conditions; split into separate AND-only calls.
-- order_by is a dictionary/map, for example {"FIRST_ACTION_DATE": "DESC"}.
-- For owner searches, use the most distinctive owner-name fragment with
-  PARTY_OPTIMIZED_NAME LIKE %FRAGMENT%, PARTY_ROLE EQ PLAINTIFF, and
-  PARTY_IS_EX_OFFICIO EQ false.
-- For mark searches, query TRADEMARK_VERBAL_ELEMENT for the most relevant found
-  names.
-
-## Analysis rules
-
-Assess overall clearance risk as exactly one of 🟢 Low, 🟠 Medium, or 🔴 High.
-Consider exact/similar matches, class fit, jurisdiction fit, active status,
-litigation, online commercial use, known reputation, and possible non-use risk
-for records older than five years where no active use is visible.
-
-Never invent registration numbers, owners, cases, dates, URLs, or legal
-conclusions. If a URL is unavailable, use a localized equivalent of "link
-unavailable". For visible web and trademark links, display the domain as link
-text and embed the full absolute URL.
+1. Ask only for missing required inputs: mark, jurisdiction or registration
+   office, and Nice class. Online presence is included by default unless the user
+   explicitly opts out.
+2. Use only the mark wording provided by the user. Use exact matching unless the
+   user explicitly asks for containing matches.
+3. Query CompuMark through both trademark routes: identical knockout and
+   custom/screening. Merge and de-duplicate IDs, then retrieve trademark details
+   for at most 100 IDs at a time.
+4. Query litigation for trademark opposition activity.
+5. For online presence, use ChatGPT's or Claude's own browsing/web-search
+   capability with: `What do you find online related to "<MARK>"? Return the 5
+   most relevant results.`
+6. Draft using the report template. Top 5 tables must contain exactly five rows;
+   fill empty rows with a localized equivalent of `No further material
+   source-backed finding`.
+7. Use only 🟢 Low, 🟠 Medium, or 🔴 High for risk. Never invent registration
+   numbers, owners, cases, dates, URLs, or legal conclusions.
+8. Generate the final PDF only with `generate_clarivate_report_pdf`. Return the
+   `pdf_url` directly to the user; do not fetch, open, download, inspect, or
+   review the PDF URL.
 """
 
 REPORT_TEMPLATE = """# AI Generated Trademark Knockout Search Report (Demo only)
@@ -512,160 +417,49 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
     else:
         web_enabled = bool(web_pref)
 
-    route_a = {
-        "tool_purpose": "CompuMark identical knockout search",
-        "arguments": {
-            "trademarkName": mark,
-            "registrationOfficeCodes": offices,
-            "classes": nice_classes,
-            "limitWOresultsToDesignated": limit_wo,
-        },
+    inputs = {
+        "mark": mark,
+        "nice_classes": nice_classes,
+        "registrationOfficeCodes": offices,
+        "limitWOresultsToDesignated": limit_wo,
+        "match_scope": match_scope,
+        "web_search_enabled": web_enabled,
     }
-
-    route_b_b1 = {
-        "stage": "B1",
-        "stop_rule": "If this returns any usable exact-match results, use it as the primary Route B set and do not broaden.",
-        "tool_purpose": "CompuMark custom/screening trademark search",
-        "arguments": build_trademark_search_args(
-            offices,
-            limit_wo,
-            [
-                {
-                    "name": "EXACT_WORD_MARK_SPECIFICATION",
-                    "operator": "CONTAINS",
-                    "value": mark,
-                }
-            ],
-            phonetics=False,
-        ),
-    }
-    route_b_b2 = []
-    route_b_b3 = []
-    for nice_class in nice_classes:
-        base_fields = [
-            {"name": "WORD_MARK_SPECIFICATION", "operator": "CONTAINS", "value": mark},
-            {"name": "INT_CLASS_NUMBER", "operator": "EQUALS", "value": nice_class},
-        ]
-        route_b_b2.append(
-            {
-                "stage": "B2",
-                "nice_class": nice_class,
-                "run_only_if": "B1 returned 0 usable results.",
-                "tool_purpose": "CompuMark custom/screening trademark search",
-                "arguments": build_trademark_search_args(offices, limit_wo, base_fields, phonetics=False),
-            }
-        )
-        route_b_b3.append(
-            {
-                "stage": "B3",
-                "nice_class": nice_class,
-                "run_only_if": f"B2 for class {nice_class} returned 0 usable results.",
-                "tool_purpose": "CompuMark custom/screening trademark search",
-                "arguments": build_trademark_search_args(offices, limit_wo, base_fields, phonetics=True),
-            }
-        )
+    if mapping_notes:
+        inputs["mapping_notes"] = mapping_notes
 
     return {
-        "planned_steps_block": [
-            "Get search criteria",
-            "Conduct trademark searches, litigation searches & online-presence search",
-            "Analyze trademark risk",
-            "Draft report",
-            "Generate final PDF",
-        ],
-        "search_statement": (
-            f"Search {mark} in {', '.join(offices)} for Nice class(es) "
-            f"{', '.join(nice_classes)}, using {match_scope} matching, reviewing active and inactive records "
-            "with default broad screening settings."
-        ),
-        "normalized_inputs": {
-            "mark": mark,
-            "nice_classes": nice_classes,
-            "registrationOfficeCodes": offices,
-            "limitWOresultsToDesignated": limit_wo,
-            "match_scope": match_scope,
-            "web_search_enabled": web_enabled,
-            "mapping_notes": mapping_notes,
-        },
-        "trademark_route_a": route_a,
-        "trademark_route_b": {
-            "stages": [route_b_b1] + route_b_b2 + route_b_b3,
-            "reporting_requirements": [
-                "Record which stage produced the working set.",
-                "Record counts for every attempted stage.",
-                "Highlight exact matches in the requested class and outside the requested class.",
+        "inputs": inputs,
+        "trademark_searches": {
+            "identical_knockout_args": {
+                "trademarkName": mark,
+                "registrationOfficeCodes": offices,
+                "classes": nice_classes,
+                "limitWOresultsToDesignated": limit_wo,
+            },
+            "custom_screening_recipe": [
+                f'Run EXACT_WORD_MARK_SPECIFICATION CONTAINS "{mark}".',
+                f'If no usable results, run WORD_MARK_SPECIFICATION CONTAINS "{mark}" with INT_CLASS_NUMBER EQUALS each requested Nice class.',
+                "If still no usable results, repeat the class searches with phonetics, centralEuropeanPhonetics, and japanesePhonetics enabled.",
+                "Stop after a useful result set; do not broaden after more than 100 results.",
             ],
+            "details": "Merge/dedupe IDs, retrieve details in batches up to 100, and create full-text URLs for selected Top 5 records.",
         },
-        "litigation_search_templates": [
-            {
-                "purpose": "Owner-related opposition search, repeated for distinctive owner fragments from the top trademarks.",
-                "request": {
-                    "conditions": [
-                        {"field": "CASE_DOMAIN", "op": "EQ", "value": "TRADEMARK", "logical_connector_to_next": "AND"},
-                        {"field": "FIRST_ACTION_TYPE", "op": "EQ", "value": "OPPOSITION", "logical_connector_to_next": "AND"},
-                        {"field": "PARTY_OPTIMIZED_NAME", "op": "LIKE", "value": "%OWNER_FRAGMENT%", "logical_connector_to_next": "AND"},
-                        {"field": "PARTY_ROLE", "op": "EQ", "value": "PLAINTIFF", "logical_connector_to_next": "AND"},
-                        {"field": "PARTY_IS_EX_OFFICIO", "op": "EQ", "value": "false"},
-                    ],
-                    "fields": [
-                        "GUID",
-                        "CASE_NAME",
-                        "FIRST_ACTION_DATE",
-                        "FIRST_ACTION_TYPE",
-                        "CASE_STATUS",
-                        "CASE_RESOLUTION",
-                        "DOCKET_COURT_COUNTRY",
-                        "PARTY_PLAINTIFF_NAME",
-                        "PARTY_DEFENDANT_NAME",
-                    ],
-                    "limit": 10,
-                    "order_by": {"FIRST_ACTION_DATE": "DESC"},
-                },
-            },
-            {
-                "purpose": "Mark-related opposition search, repeated for the most relevant trademark names.",
-                "request": {
-                    "conditions": [
-                        {"field": "CASE_DOMAIN", "op": "EQ", "value": "TRADEMARK", "logical_connector_to_next": "AND"},
-                        {"field": "FIRST_ACTION_TYPE", "op": "EQ", "value": "OPPOSITION", "logical_connector_to_next": "AND"},
-                        {"field": "TRADEMARK_VERBAL_ELEMENT", "op": "EQ", "value": mark},
-                    ],
-                    "fields": [
-                        "GUID",
-                        "CASE_NAME",
-                        "FIRST_ACTION_DATE",
-                        "FIRST_ACTION_TYPE",
-                        "CASE_STATUS",
-                        "CASE_RESOLUTION",
-                        "DOCKET_COURT_COUNTRY",
-                        "TRADEMARK_VERBAL_ELEMENT",
-                    ],
-                    "limit": 10,
-                    "order_by": {"FIRST_ACTION_DATE": "DESC"},
-                },
-            },
-        ],
+        "litigation_search": (
+            f'Run trademark opposition litigation/caselaw search for TRADEMARK_VERBAL_ELEMENT EQ "{mark}", '
+            "CASE_DOMAIN EQ TRADEMARK, FIRST_ACTION_TYPE EQ OPPOSITION, limit 10, newest first. "
+            "Optionally repeat for material owner-name fragments as plaintiffs."
+        ),
         "online_presence": {
             "enabled": web_enabled,
-            "default_behavior": "enabled unless the user explicitly opts out",
             "search_guidance": (
                 f'What do you find online related to "{mark}"? Return the 5 most relevant results.'
                 if web_enabled
                 else "Online presence search skipped because the user opted out."
             ),
-            "note": (
-                "Use ChatGPT's or Claude's own browsing/web-search capability for this plain online-presence check."
-                if web_enabled
-                else "Online presence search skipped because the user opted out."
-            ),
         },
-        "post_collection": [
-            "Merge Route A and Route B IDs and de-duplicate.",
-            "Retrieve trademark details for no more than 100 IDs per content call.",
-            "Create full-text URLs for selected top IDs.",
-            "Select five most relevant trademarks by name similarity, active status, class fit, and jurisdiction fit.",
-            "Analyze risk before drafting.",
-        ],
+        "report_template_markdown": REPORT_TEMPLATE,
+        "pdf_handoff": "After validation, call generate_clarivate_report_pdf and give the user its pdf_url directly without opening or downloading it.",
     }
 
 
