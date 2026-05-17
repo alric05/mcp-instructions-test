@@ -123,13 +123,17 @@ OFFICE_ALIASES = {
     "MEXICO": "MX",
 }
 
-PLANNED_STEPS = [
-    "Get search criteria",
-    "Conduct trademark searches, litigation searches & online-presence search",
-    "Analyze trademark risk",
-    "Draft report",
-    "Generate final PDF",
+WORKFLOW_ID = "trademark_knockout_report_v1"
+WORKFLOW_NAME = "trademark_knockout_report"
+WORKFLOW_GOAL = "Generate a source-backed trademark knockout report and Clarivate-template PDF."
+WORKFLOW_STEPS = [
+    {"step_id": "criteria", "title": "Confirm criteria"},
+    {"step_id": "plan", "title": "Build call plan"},
+    {"step_id": "collect", "title": "Collect evidence"},
+    {"step_id": "report", "title": "Analyze and draft"},
+    {"step_id": "deliver", "title": "Validate, render, respond"},
 ]
+WORKFLOW_STEP_IDS = [step["step_id"] for step in WORKFLOW_STEPS]
 
 REPORT_SECTION_PATTERNS = [
     (r"^##\s+1\.", "section 1 Search Criteria"),
@@ -149,104 +153,6 @@ TOP_5_TABLE_PATTERNS = {
     "2.2": r"^###\s+2\.2\b",
     "3.2": r"^###\s+3\.2\b",
 }
-
-WORKFLOW_INSTRUCTIONS = """# Trademark Knockout Workflow Instructions
-
-Use this MCP for report workflow policy, validation, and PDF generation. Live
-trademark and litigation data must come from the connected Clarivate CompuMark
-MCP tools, whose own tool metadata remains the source of truth for available
-fields, operators, and low-level API constraints.
-
-## Required visible behavior
-
-1. Detect the user's language from the prompt and use it for visible headings,
-   labels, table headers, status values, summaries, and final report text. Do
-   not translate tool names, IDs, URLs, registration numbers, or mark verbal
-   elements from source records.
-2. Display a localized **Planned Steps** block exactly once before Step 1:
-   1. Get search criteria
-   2. Conduct trademark searches, litigation searches & online-presence search
-   3. Analyze trademark risk
-   4. Draft report
-   5. Generate final PDF
-3. Ask only for missing required inputs, one at a time: mark name, jurisdiction
-   or registration office, and Nice class. Do not ask for online-presence
-   preference unless the user explicitly raises it.
-4. Use only the mark wording provided by the user. Do not add unrequested
-   variations. Use exact matching unless the user explicitly asks for containing
-   matches.
-5. Call build_trademark_knockout_execution_plan and use the returned call plan
-   with the matching CompuMark tools. Do not restate or rediscover
-   CompuMark schemas unless a tool call fails and the CompuMark helper tools are
-   needed.
-6. Run both trademark routes from the plan, retrieve trademark details for no
-   more than 100 IDs per content call, create full-text URLs for selected top
-   IDs, and run the litigation searches in the plan.
-7. Run online-presence search by default using ChatGPT's or Claude's own
-   browsing/web-search capability. Use this instruction: `What do you find
-   online related to "<MARK>"? Return the 5 most relevant results.` Skip it only
-   if the user explicitly opts out.
-8. Draft the report with the exact report structure returned by
-   get_trademark_knockout_report_template. Top 5 tables must contain exactly
-   five rows; use a localized equivalent of "No further material source-backed
-   finding" for empty rows.
-9. Generate the final PDF only with generate_clarivate_report_pdf. Do not create
-   a ChatGPT/native PDF artifact, do not export markdown to PDF yourself, and do
-   not link to a chatgpt.com conversation anchor as the report PDF.
-10. In the final response, the "Download the report" link must be the pdf_url
-   returned by generate_clarivate_report_pdf. The URL must be an HTTPS /reports/
-   URL from this MCP server, for example
-   https://example.onrender.com/reports/report_name.pdf. If pdf_url is null or
-   missing, state that the PDF was generated inside the server but no public
-   download URL is configured. Do not fetch, open, download, inspect, or review
-   the pdf_url; return the link to the user as-is.
-
-## Step summary behavior
-
-After Steps 1, 2, 3, and 4, display exactly this localized three-bullet block:
-
-**Step X Summary**
-- **Completed:** ...
-- **Key findings:** ...
-- **Next:** ...
-
-After Step 5, before the report, display a markdown blockquote:
-
-> **Final Summary Before Report**
-> - **Overall risk view:** exactly one of 🟢 Low / 🟠 Medium / 🔴 High
-> - **Top conflicts:** concise source-backed list or none identified
-> - **Deliverable status:** Report text complete; PDF URL returned: [filename or URL].
-
-If the PDF tool does not return a pdf_url, state that no public download URL is
-available.
-If the only available link is a chatgpt.com/c conversation link, that is not the
-generated report PDF and must be treated as a failed public-download handoff.
-
-## Data collection rules
-
-- Use the normalized offices, WO-designation flag, and route arguments returned
-  by build_trademark_knockout_execution_plan.
-- Merge IDs from both trademark routes, de-duplicate, keep per-route counts, and
-  record route-specific errors.
-- For staged screening, stop broadening once a stage returns a useful set. If a
-  stage returns more than 100 results, do not run broader stages; trim by
-  relevance during analysis.
-- For litigation, avoid OR conditions; split owner and mark checks into
-  separate AND-only calls.
-
-## Analysis rules
-
-Assess overall clearance risk as exactly one of 🟢 Low, 🟠 Medium, or 🔴 High.
-Consider exact/similar matches, class fit, jurisdiction fit, active status,
-litigation, online commercial use, known reputation, and possible non-use risk
-for records older than five years where no active use is visible.
-
-Never invent registration numbers, owners, cases, dates, URLs, or legal
-conclusions. If a URL is unavailable, use a localized equivalent of "link
-unavailable". Use `full-text` as the visible label for CompuMark full-text
-links. For ordinary web links, display the domain as link text and embed the
-full absolute URL.
-"""
 
 REPORT_TEMPLATE = """# AI Generated Trademark Knockout Search Report (Demo only)
 
@@ -462,33 +368,183 @@ def build_trademark_search_base_args(offices: List[str], limit_wo: bool) -> Dict
     }
 
 
-def build_trademark_search_args(
-    offices: List[str],
-    limit_wo: bool,
-    search_fields: List[Dict[str, str]],
-    phonetics: bool,
-) -> Dict[str, Any]:
+def start_workflow(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    criteria = arguments.get("search_criteria") or arguments.get("criteria") or {}
+    if criteria is None:
+        criteria = {}
+    if not isinstance(criteria, dict):
+        raise ValueError("search_criteria must be an object when provided.")
     return {
-        **build_trademark_search_base_args(offices, limit_wo),
-        **phonetic_args(phonetics),
-        "searchFields": search_fields,
+        "workflow_id": WORKFLOW_ID,
+        "goal": WORKFLOW_GOAL,
+        "high_level_plan": WORKFLOW_STEPS,
+        "criteria_status": {"missing": missing_required_criteria(criteria)},
+        "first_step_id": WORKFLOW_STEPS[0]["step_id"],
+        "next_tool_to_call": "continue_workflow",
+        "agent_contract": [
+            "Follow steps in order using next_step_id.",
+            "Do not skip deliver.",
+            "Use specialist tools for details; this workflow only coordinates.",
+        ],
     }
 
 
-def get_workflow(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    language = arguments.get("language") or "detected from user prompt"
+def workflow_step_title(step_id: str) -> str:
+    for step in WORKFLOW_STEPS:
+        if step["step_id"] == step_id:
+            return step["title"]
+    raise ValueError(f"Unknown workflow step_id: {step_id}")
+
+
+def next_workflow_step_id(step_id: str) -> Optional[str]:
+    try:
+        index = WORKFLOW_STEP_IDS.index(step_id)
+    except ValueError:
+        raise ValueError(f"Unknown workflow step_id: {step_id}")
+    if index + 1 >= len(WORKFLOW_STEP_IDS):
+        return None
+    return WORKFLOW_STEP_IDS[index + 1]
+
+
+def normalized_criteria_snapshot(criteria: Dict[str, Any]) -> Dict[str, Any]:
+    mark = clean_mark(str(criteria.get("mark") or criteria.get("trademark") or criteria.get("subject") or ""))
+    jurisdictions = criteria.get("jurisdictions") or criteria.get("jurisdiction") or criteria.get("offices")
+    nice_classes = criteria.get("nice_classes") or criteria.get("classes") or criteria.get("nice_class")
     return {
-        "language": language,
-        "instructions": WORKFLOW_INSTRUCTIONS,
-        "planned_steps": PLANNED_STEPS,
-        "required_compumark_tool_purposes": [
-            "identical knockout trademark search",
-            "custom/screening trademark search",
-            "trademark content/details for up to 100 IDs",
-            "full-text URL creation for trademark IDs",
-            "trademark litigation/caselaw search",
-        ],
-        "online_presence_search_default": "enabled unless the user explicitly opts out",
+        "mark": mark,
+        "jurisdictions": jurisdictions,
+        "nice_classes": nice_classes,
+        "match_scope": criteria.get("match_scope") or "exact",
+        "web_search_enabled": criteria.get("web_search_enabled", True),
+    }
+
+
+def missing_required_criteria(criteria: Dict[str, Any]) -> List[str]:
+    snapshot = normalized_criteria_snapshot(criteria)
+    missing = []
+    if not snapshot["mark"]:
+        missing.append("mark")
+    if not snapshot["jurisdictions"]:
+        missing.append("jurisdictions")
+    if not snapshot["nice_classes"]:
+        missing.append("nice_classes")
+    return missing
+
+
+def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_result: Any) -> Dict[str, Any]:
+    next_step = next_workflow_step_id(step_id)
+    if step_id == "criteria":
+        missing = missing_required_criteria(criteria)
+        if missing:
+            return {
+                "instructions": [
+                    "Ask for the first missing required input only.",
+                    "Required: mark, jurisdiction/office, Nice class.",
+                    "Defaults: exact match; web search on unless opted out.",
+                ],
+                "missing": missing,
+                "success_criteria": "One missing input is requested from the user; no search is run yet.",
+                "next_step_id": step_id,
+                "next_tool_to_call": "continue_workflow",
+                "done": False,
+            }
+        return {
+            "instructions": [
+                "Keep the mark wording exact.",
+                "Move on once mark, jurisdiction/office, and Nice class are known.",
+            ],
+            "criteria": normalized_criteria_snapshot(criteria),
+            "success_criteria": "Required criteria are complete and normalized enough to build the plan.",
+            "next_step_id": next_step,
+            "next_tool_to_call": "continue_workflow",
+            "done": False,
+        }
+
+    if step_id == "plan":
+        return {
+            "instructions": [
+                "Call build_trademark_knockout_execution_plan.",
+                "Use its normalized offices, routes, litigation guidance, and web-search guidance.",
+            ],
+            "output": "execution_plan",
+            "success_criteria": "Execution plan is available; do not start drafting yet.",
+            "next_step_id": next_step,
+            "next_tool_to_call": "continue_workflow",
+            "done": False,
+        }
+
+    if step_id == "collect":
+        return {
+            "instructions": [
+                "Run the planned CompuMark trademark and litigation searches.",
+                "De-duplicate IDs; keep route counts and errors.",
+                "Fetch details and full-text URLs for likely top records.",
+                "Run the planned web search unless opted out.",
+            ],
+            "output": "evidence",
+            "success_criteria": "Evidence set includes route counts, source records, litigation results, web findings or opt-out note, and errors if any.",
+            "next_step_id": next_step,
+            "next_tool_to_call": "continue_workflow",
+            "done": False,
+        }
+
+    if step_id == "report":
+        return {
+            "instructions": [
+                "Assess risk as 🟢 Low, 🟠 Medium, or 🔴 High using source-backed evidence.",
+                "Call get_trademark_knockout_report_template and draft to that structure.",
+                "Keep Top 5 tables at exactly five rows.",
+                "Use full-text labels for CompuMark links and domains for web links.",
+            ],
+            "output": "report_markdown",
+            "success_criteria": "Markdown report is source-backed, complete, and ready for validation.",
+            "next_step_id": next_step,
+            "next_tool_to_call": "continue_workflow",
+            "done": False,
+        }
+
+    if step_id == "deliver":
+        return {
+            "instructions": [
+                "Validate the markdown; fix issues before rendering.",
+                "Generate the Clarivate-template PDF.",
+                "Return a concise final answer with the generated pdf_url/download_the_report link.",
+            ],
+            "output": "final response",
+            "success_criteria": "Validation passes, PDF tool is called, final answer uses the returned PDF URL or states no public URL is configured.",
+            "next_step_id": None,
+            "next_tool_to_call": None,
+            "done": True,
+        }
+
+    raise ValueError(f"Unknown workflow step_id: {step_id}")
+
+
+def continue_workflow(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    workflow_id = arguments.get("workflow_id")
+    if workflow_id != WORKFLOW_ID:
+        raise ValueError(f"Unknown workflow_id: {workflow_id}. Expected {WORKFLOW_ID}.")
+    step_id = arguments.get("step_id")
+    if not step_id:
+        raise ValueError("step_id is required.")
+    criteria = arguments.get("search_criteria") or arguments.get("criteria") or {}
+    if criteria is None:
+        criteria = {}
+    if not isinstance(criteria, dict):
+        raise ValueError("search_criteria must be an object when provided.")
+    previous_step_result = arguments.get("previous_step_result")
+    payload = workflow_step_payload(str(step_id), criteria, previous_step_result)
+    done = bool(payload.get("done"))
+    return {
+        "workflow_id": WORKFLOW_ID,
+        "current_step_id": step_id,
+        "step_title": workflow_step_title(str(step_id)),
+        "next_action": (
+            "Respond to the user and stop this workflow."
+            if done
+            else "Complete this step, then call continue_workflow with next_step_id."
+        ),
+        **payload,
     }
 
 
@@ -571,7 +627,6 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
     ]
 
     return {
-        "planned_steps_block": PLANNED_STEPS,
         "search_statement": (
             f"Search {mark} in {', '.join(offices)} for Nice class(es) "
             f"{', '.join(nice_classes)}, using {match_scope} matching, reviewing active and inactive records "
@@ -591,59 +646,15 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "tool_purpose": "custom/screening trademark search",
             "base_arguments": route_b_base_args,
             "stages": route_b_stages,
-            "call_instruction": "Merge base_arguments with the stage delta/template. For template stages, substitute each requested Nice class for {nice_class}.",
-            "stop_rule": "Stop broadening after a useful stage; if a stage returns more than 100 results, trim by relevance instead of broadening.",
-            "reporting": "Record attempted-stage counts and which stage produced the working set.",
+            "call_instruction": "Merge base_arguments with stage delta/template; replace {nice_class}.",
+            "stop_rule": "Stop after useful stage or >100 results.",
+            "reporting": "Record counts, errors, and working stage.",
         },
-        "litigation_search_templates": [
-            {
-                "purpose": "Owner-related opposition search, repeated for distinctive owner fragments from the top trademarks.",
-                "request": {
-                    "conditions": [
-                        {"field": "CASE_DOMAIN", "op": "EQ", "value": "TRADEMARK", "logical_connector_to_next": "AND"},
-                        {"field": "FIRST_ACTION_TYPE", "op": "EQ", "value": "OPPOSITION", "logical_connector_to_next": "AND"},
-                        {"field": "PARTY_OPTIMIZED_NAME", "op": "LIKE", "value": "%OWNER_FRAGMENT%", "logical_connector_to_next": "AND"},
-                        {"field": "PARTY_ROLE", "op": "EQ", "value": "PLAINTIFF", "logical_connector_to_next": "AND"},
-                        {"field": "PARTY_IS_EX_OFFICIO", "op": "EQ", "value": "false"},
-                    ],
-                    "fields": [
-                        "GUID",
-                        "CASE_NAME",
-                        "FIRST_ACTION_DATE",
-                        "FIRST_ACTION_TYPE",
-                        "CASE_STATUS",
-                        "CASE_RESOLUTION",
-                        "DOCKET_COURT_COUNTRY",
-                        "PARTY_PLAINTIFF_NAME",
-                        "PARTY_DEFENDANT_NAME",
-                    ],
-                    "limit": 10,
-                    "order_by": {"FIRST_ACTION_DATE": "DESC"},
-                },
-            },
-            {
-                "purpose": "Mark-related opposition search, repeated for the most relevant trademark names.",
-                "request": {
-                    "conditions": [
-                        {"field": "CASE_DOMAIN", "op": "EQ", "value": "TRADEMARK", "logical_connector_to_next": "AND"},
-                        {"field": "FIRST_ACTION_TYPE", "op": "EQ", "value": "OPPOSITION", "logical_connector_to_next": "AND"},
-                        {"field": "TRADEMARK_VERBAL_ELEMENT", "op": "EQ", "value": mark},
-                    ],
-                    "fields": [
-                        "GUID",
-                        "CASE_NAME",
-                        "FIRST_ACTION_DATE",
-                        "FIRST_ACTION_TYPE",
-                        "CASE_STATUS",
-                        "CASE_RESOLUTION",
-                        "DOCKET_COURT_COUNTRY",
-                        "TRADEMARK_VERBAL_ELEMENT",
-                    ],
-                    "limit": 10,
-                    "order_by": {"FIRST_ACTION_DATE": "DESC"},
-                },
-            },
-        ],
+        "litigation": {
+            "goal": "opposition checks for top owners and marks",
+            "defaults": {"case_domain": "TRADEMARK", "first_action_type": "OPPOSITION", "limit": 10},
+            "rules": ["use AND-only calls", "for owners, prefer distinctive owner fragments as plaintiff"],
+        },
         "online_presence": {
             "enabled": web_enabled,
             "search_guidance": (
@@ -653,7 +664,7 @@ def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
             ),
             "source": "agent browsing/web search, not CompuMark",
         },
-        "post_collection": "Merge and de-duplicate route IDs; fetch details in batches of at most 100; create full-text URLs for selected top IDs; select the five most relevant records before drafting.",
+        "post_collection": "De-duplicate IDs; fetch details in batches <=100; create full-text URLs for top records.",
     }
 
 
@@ -1102,34 +1113,76 @@ def generate_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 TOOLS: Dict[str, Dict[str, Any]] = {
-    "get_trademark_knockout_workflow": {
-        "description": "Return concise trademark knockout workflow policy for agent-visible behavior, data collection, validation, and PDF handoff.",
+    "start_workflow": {
+        "description": "Start the report workflow; returns a short plan and first step.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "workflow_name": {
+                    "type": "string",
+                    "description": "Optional; defaults to trademark_knockout_report.",
+                },
+                "user_goal": {
+                    "type": "string",
+                    "description": "User request.",
+                },
+                "search_criteria": {
+                    "type": "object",
+                    "description": "Known criteria: mark, jurisdictions, nice_classes, match_scope, web_search_enabled.",
+                    "additionalProperties": True,
+                },
                 "language": {
                     "type": "string",
-                    "description": "Optional user-visible language name, otherwise detect from the user's prompt.",
-                }
+                    "description": "Optional visible language.",
+                },
             },
             "additionalProperties": False,
         },
-        "handler": get_workflow,
+        "handler": start_workflow,
+    },
+    "continue_workflow": {
+        "description": "Return step instructions, success criteria, and next action.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["workflow_id", "step_id"],
+            "properties": {
+                "workflow_id": {
+                    "type": "string",
+                    "description": f"Expected {WORKFLOW_ID}.",
+                },
+                "step_id": {
+                    "type": "string",
+                    "description": "Current step id.",
+                },
+                "search_criteria": {
+                    "type": "object",
+                    "description": "Original or normalized criteria.",
+                    "additionalProperties": True,
+                },
+                "previous_step_result": {
+                    "type": "object",
+                    "description": "Optional previous result.",
+                    "additionalProperties": True,
+                },
+            },
+            "additionalProperties": False,
+        },
+        "handler": continue_workflow,
     },
     "get_trademark_knockout_report_template": {
-        "description": "Return the required markdown report structure and drafting rules.",
+        "description": "Return report markdown template.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "handler": get_report_template,
     },
     "build_trademark_knockout_execution_plan": {
-        "description": "Normalize inputs and return a compact CompuMark call plan plus web, analysis, and PDF steps.",
+        "description": "Normalize inputs and return compact CompuMark/web search plan.",
         "inputSchema": {
             "type": "object",
             "required": ["mark", "jurisdictions", "nice_classes"],
             "properties": {
-                "mark": {"type": "string", "description": "Proposed word mark exactly as provided by the user."},
+                "mark": {"type": "string", "description": "Proposed mark exactly as provided."},
                 "jurisdictions": {
-                    "description": "Jurisdictions or office codes, such as EU, UK, US, WIPO, France, or EM/GB/US/WO.",
+                    "description": "Jurisdictions or office codes.",
                     "type": "array",
                     "items": {"type": "string"},
                 },
@@ -1140,11 +1193,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                 },
                 "match_scope": {
                     "type": "string",
-                    "description": "Use 'exact' unless the user explicitly asked for containing matches.",
+                    "description": "exact unless user asked for contains.",
                     "default": "exact",
                 },
                 "web_search_enabled": {
-                    "description": "Whether to run online-presence search. Defaults to true; set false only when the user explicitly opts out.",
+                    "description": "Defaults true; false only if opted out.",
                     "type": "boolean",
                     "default": True,
                 },
@@ -1154,38 +1207,38 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "handler": build_execution_plan,
     },
     "validate_trademark_knockout_report": {
-        "description": "Validate report structure, Top 5 row counts, risk labels, and link-label conventions before PDF generation.",
+        "description": "Validate report markdown before PDF generation.",
         "inputSchema": {
             "type": "object",
             "required": ["markdown"],
-            "properties": {"markdown": {"type": "string", "description": "Final report markdown to validate."}},
+            "properties": {"markdown": {"type": "string", "description": "Report markdown."}},
             "additionalProperties": False,
         },
         "handler": validate_report,
     },
     "generate_clarivate_report_pdf": {
-        "description": "Generate the final Clarivate-template PDF from finalized markdown.",
+        "description": "Generate Clarivate-template PDF.",
         "inputSchema": {
             "type": "object",
             "required": ["subject"],
             "properties": {
-                "subject": {"type": "string", "description": "Cover subtitle, usually the searched mark."},
-                "markdown": {"type": "string", "description": "Finalized report markdown text."},
-                "markdown_path": {"type": "string", "description": "Path to finalized report markdown, used if markdown is not supplied."},
+                "subject": {"type": "string", "description": "Cover subtitle / mark."},
+                "markdown": {"type": "string", "description": "Report markdown."},
+                "markdown_path": {"type": "string", "description": "Markdown path if markdown omitted."},
                 "output_path": {
                     "type": "string",
-                    "description": "PDF output path. Relative paths resolve under TRADEMARK_REPORT_OUTPUT_DIR or the server working directory.",
+                    "description": "PDF output path.",
                 },
                 "template_path": {
                     "type": "string",
-                    "description": "Optional alternative Clarivate template path. Defaults to the MCP server bundled template.",
+                    "description": "Optional template path.",
                 },
                 "save_markdown": {
                     "type": "boolean",
                     "default": True,
-                    "description": "Save the markdown next to the generated PDF.",
+                    "description": "Save markdown copy.",
                 },
-                "markdown_output_path": {"type": "string", "description": "Optional path for the saved markdown copy."},
+                "markdown_output_path": {"type": "string", "description": "Optional markdown output path."},
             },
             "additionalProperties": False,
         },
@@ -1272,14 +1325,41 @@ def run_stdio() -> int:
 
 def self_test() -> int:
     tools = handle_tools_list(1)["result"]["tools"]
-    plan = build_execution_plan(
+    criteria = {
+        "mark": "NOVALYTIC",
+        "jurisdictions": ["EU", "UK"],
+        "nice_classes": ["9", "42"],
+    }
+    workflow_start = start_workflow(
         {
-            "mark": "NOVALYTIC",
-            "jurisdictions": ["EU", "UK"],
-            "nice_classes": ["9", "42"],
+            "user_goal": "Generate a trademark knockout report for NOVALYTIC in the EU and UK.",
+            "search_criteria": criteria,
         }
     )
-    print(json.dumps({"tools": [tool["name"] for tool in tools], "sample_plan": plan}, ensure_ascii=False, indent=2))
+    first_step = continue_workflow(
+        {
+            "workflow_id": workflow_start["workflow_id"],
+            "step_id": workflow_start["first_step_id"],
+            "search_criteria": criteria,
+        }
+    )
+    plan = build_execution_plan(
+        {
+            **criteria,
+        }
+    )
+    print(
+        json.dumps(
+            {
+                "tools": [tool["name"] for tool in tools],
+                "workflow_start": workflow_start,
+                "first_step": first_step,
+                "sample_execution_plan": plan,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

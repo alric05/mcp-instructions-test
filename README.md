@@ -2,19 +2,19 @@
 
 This is a standalone MCP-only replacement for the Codex plugin skill layer. It
 does not call the CompuMark data APIs itself; instead, it gives Codex MCP tools
-for the workflow, search plan, report template, validation gates, and final PDF
-generation. Live trademark and litigation records still come from the existing
-Clarivate CompuMark MCP connector.
+for a staged report workflow, search plan, report template, validation gates,
+and final PDF generation. Live trademark and litigation records still come from
+the existing Clarivate CompuMark MCP connector.
 
 ## What This Server Provides
 
-- `get_trademark_knockout_workflow`
-  - Returns the full workflow and output rules that were previously stored in
-    plugin skill files.
+- `start_workflow`
+  - Returns a short high-level plan plus the first step id.
+- `continue_workflow`
+  - Returns one step's instructions, success criteria, and next action.
 - `build_trademark_knockout_execution_plan`
   - Normalizes mark, jurisdiction, Nice class, match scope, and online-presence
-    default into a concrete plan for the CompuMark MCP tools and a goal-oriented
-    web-search brief.
+    default into a compact CompuMark/web-search plan.
 - `get_trademark_knockout_report_template`
   - Returns the required report structure.
 - `validate_trademark_knockout_report`
@@ -43,27 +43,35 @@ python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-
 
 ## Expected Workflow In A Report Run
 
-1. Call `get_trademark_knockout_workflow`.
-2. Ask the user only for missing inputs: mark, jurisdiction/office, and Nice
-   class. Do not ask about online presence unless the user raises it; online
-   presence is enabled by default.
-3. Call `build_trademark_knockout_execution_plan`.
-4. Use the existing CompuMark MCP connector tools by purpose:
+1. Call `start_workflow` with the user's goal and any known search criteria.
+2. Call `continue_workflow` with the returned `first_step_id`.
+3. Complete only the current step's instructions and success criteria.
+4. Call `continue_workflow` again with the returned `next_step_id`.
+5. Repeat until `done` is true.
+
+The current linear workflow is:
+
+```text
+criteria
+→ plan
+→ collect
+→ report
+→ deliver
+```
+
+The workflow tool coordinates the process; specialist tools carry the detail.
+During these steps, use the existing CompuMark MCP connector tools by purpose:
    - identical knockout trademark search;
    - custom/screening trademark search;
    - trademark content/details lookup;
    - full-text URL creation;
    - litigation/caselaw search.
-5. Run the online-presence check by default using ChatGPT's or Claude's own
-   browsing/web-search capability. Use the plain instruction: `What do you find
-   online related to "<MARK>"? Return the 5 most relevant results.` Skip it only
-   if the user explicitly opts out.
-6. Draft the report with `get_trademark_knockout_report_template`.
-7. Call `validate_trademark_knockout_report`.
-8. Call `generate_clarivate_report_pdf`.
-9. Give the user the `download_the_report`/`pdf_url` returned by
-   `generate_clarivate_report_pdf`. Do not fetch, open, download, inspect, or
-   review the final PDF URL.
+
+Run online-presence checks by default using ChatGPT's or Claude's own
+browsing/web-search capability. Skip them only if the user explicitly opts out.
+Give the user the `download_the_report`/`pdf_url` returned by
+`generate_clarivate_report_pdf`. Do not fetch, open, download, inspect, or
+review the final PDF URL.
 
 ## Test From ChatGPT Web
 
