@@ -13,7 +13,8 @@ Clarivate CompuMark MCP connector.
     plugin skill files.
 - `build_trademark_knockout_execution_plan`
   - Normalizes mark, jurisdiction, Nice class, match scope, and online-presence
-    default into a compact plan. The plan includes the full report template.
+    default into a concrete plan for the CompuMark MCP tools and a goal-oriented
+    web-search brief.
 - `get_trademark_knockout_report_template`
   - Returns the required report structure.
 - `validate_trademark_knockout_report`
@@ -57,7 +58,7 @@ python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-
    browsing/web-search capability. Use the plain instruction: `What do you find
    online related to "<MARK>"? Return the 5 most relevant results.` Skip it only
    if the user explicitly opts out.
-6. Draft the report with the plan's `report_template_markdown`.
+6. Draft the report with `get_trademark_knockout_report_template`.
 7. Call `validate_trademark_knockout_report`.
 8. Call `generate_clarivate_report_pdf`.
 9. Give the user the `download_the_report`/`pdf_url` returned by
