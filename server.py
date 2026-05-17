@@ -269,26 +269,35 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     elif step == "trademark_search":
         instructions = append_next_instruction(
-            "Use the CompuMark trademark tools to find the most relevant records. Start with an exact or knockout search for the mark "
-            "in the requested offices and classes. If the result set is thin, or the user expects a broader screen, run one broader trademark-search. "
-            "Select up to five records by exactness, territory, class overlap, active status, and owner relevance. For those IDs, fetch trademark-content "
-            "and create full-text links. Do not fetch goods unless the report genuinely needs goods/specification detail.",
+            "Use the CompuMark trademark-search tool to find the most relevant records. Do not use the knockout-search tool. "
+            "Perform at most three trademark searches. An exact search without phonetics, an exact search with phonetics, and a contain search with phonetics. " 
+            "Only proceed to next search if you have less than five results. Start with the exact search "
+            "in the requested offices and classes. "
+            "Select five records by exactness, territory, class overlap, active status, and owner relevance. For those IDs, fetch trademark-content "
+            "and create full-text links. Do not fetch goods."
+            "* Avoid calling country code lookup tools if possible. Use your internal knowledge of country codes when possible."
+            "* If a specific country is specified, also include "WO" with "limitWOresultsToDesignated": true in search parameters."
+            "* If an EU country is specified, also include "EM" and "WO" with "limitWOresultsToDesignated": true in search parameters.",
             next_step,
         )
-        expected_output = "Top trademark references, search counts or result notes, content for selected IDs, and full-text links labeled 'full-text'."
+        expected_output = "Top trademark references, content for selected IDs, and full-text links labeled 'full-text'."
 
     elif step == "litigation_search":
         instructions = append_next_instruction(
-            "Use search-litigation-cases lightly for trademark disputes involving the searched mark, the strongest matching verbal elements, "
+            "Use the CompuMark litigation-search tool lightly for trademark disputes involving the searched mark, the strongest matching verbal elements, "
             "or owners from the top references. Keep only cases that could affect risk. Summarize parties, jurisdiction, status, case type, "
-            "and why each case matters. If there is no material litigation, say so plainly.",
+            "and why each case matters. If there is no material litigation, say so plainly. "
+            "* always use this condition on first action type: {"field": "FIRST_ACTION_TYPE", "op": "EQ", "value": "OPPOSITION"}. "
+            "* When using a filter on party name, also include this filter: {"field":"PARTY_IS_EX_OFFICIO","op":"EQ","value":false}. "
+            "* avoid queries with OR conditions. Instead, split them into multiple separate queries that use only AND conditions. "
+            "* the format of the order_by clause is a dict. A valid example: order_by: { FIRST_ACTION_DATE:  "DESC" }.",
             next_step,
         )
         expected_output = "Material litigation findings or a clear no-material-litigation note."
 
     elif step == "online_presence":
         instructions = append_next_instruction(
-            "Run a concise online presence search unless the user opted out. Look for exact mark use and close variants in relevant territories. "
+            "Use your intenal browser to run a concise online presence search unless the user opted out. Look for exact mark use and close variants in relevant territories. "
             "Keep the five most useful findings: companies, products, domains, social profiles, or obvious marketplace conflicts. Use domain labels for web links.",
             next_step,
         )
