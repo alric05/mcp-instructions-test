@@ -8,13 +8,17 @@ the existing Clarivate CompuMark MCP connector.
 
 ## What This Server Provides
 
+All tools expose concise descriptions, input schemas, and output schemas. Tool
+calls also return structured content for clients that use MCP output schemas.
+
 - `start_workflow`
   - Returns a short high-level plan plus the first step id.
 - `continue_workflow`
   - Returns one step's instructions, success criteria, and next action.
 - `build_trademark_knockout_execution_plan`
   - Normalizes mark, jurisdiction, Nice class, match scope, and online-presence
-    default into a compact CompuMark/web-search plan.
+    default into a compact plan. Concrete CompuMark call arguments are returned
+    by `continue_workflow` at the `collect` step.
 - `get_trademark_knockout_report_template`
   - Returns the required report structure.
 - `validate_trademark_knockout_report`
@@ -48,6 +52,10 @@ python3 -m pip install -r "/Users/alric.bouantoun/Library/CloudStorage/OneDrive-
 3. Complete only the current step's instructions and success criteria.
 4. Call `continue_workflow` again with the returned `next_step_id`.
 5. Repeat until `done` is true.
+
+`build_trademark_knockout_execution_plan` is intentionally not enough to run the
+whole report. It normalizes scope and points back to `continue_workflow`. The
+`collect` step returns the concrete trademark-search arguments for that step.
 
 The current linear workflow is:
 

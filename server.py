@@ -263,7 +263,10 @@ def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
         text = payload
     else:
         text = json.dumps(payload, ensure_ascii=False, indent=2)
-    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+    result = {"content": [{"type": "text", "text": text}], "isError": is_error}
+    if not is_error and isinstance(payload, (dict, list)):
+        result["structuredContent"] = payload
+    return result
 
 
 def json_rpc_result(message_id: Any, result: Any) -> Dict[str, Any]:
@@ -431,6 +434,83 @@ def missing_required_criteria(criteria: Dict[str, Any]) -> List[str]:
     return missing
 
 
+def web_search_enabled(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"no", "false", "0", "n", "disabled", "skip", "off"}
+    if value is None:
+        return True
+    return bool(value)
+
+
+def normalize_search_inputs(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    mark = clean_mark(str(arguments.get("mark") or arguments.get("trademark") or arguments.get("subject") or ""))
+    if not mark:
+        raise ValueError("mark is required.")
+    nice_classes = normalize_classes(arguments.get("nice_classes") or arguments.get("classes") or arguments.get("nice_class"))
+    jurisdictions = arguments.get("jurisdictions") or arguments.get("registrationOfficeCodes") or arguments.get("offices")
+    offices, mapping_notes, limit_wo = normalize_jurisdictions(jurisdictions)
+    match_scope = (arguments.get("match_scope") or "exact").strip().lower()
+    if match_scope not in {"exact", "contains"}:
+        match_scope = "exact"
+    return {
+        "mark": mark,
+        "nice_classes": nice_classes,
+        "registrationOfficeCodes": offices,
+        "limitWOresultsToDesignated": limit_wo,
+        "match_scope": match_scope,
+        "web_search_enabled": web_search_enabled(arguments.get("web_search_enabled", True)),
+        "mapping_notes": mapping_notes,
+    }
+
+
+def search_inputs_from_step_context(criteria: Dict[str, Any], previous_step_result: Any) -> Dict[str, Any]:
+    merged = dict(criteria)
+    if isinstance(previous_step_result, dict):
+        normalized = previous_step_result.get("normalized_inputs")
+        if isinstance(normalized, dict):
+            for key, value in normalized.items():
+                merged.setdefault(key, value)
+    return normalize_search_inputs(merged)
+
+
+def build_trademark_search_calls(normalized: Dict[str, Any]) -> Dict[str, Any]:
+    mark = normalized["mark"]
+    offices = normalized["registrationOfficeCodes"]
+    limit_wo = normalized["limitWOresultsToDesignated"]
+    exact_search_args = {
+        **build_trademark_search_base_args(offices, limit_wo, plurals=False),
+        "crossReferences": False,
+        "searchFields": [
+            {
+                "name": "EXACT_WORD_MARK_SPECIFICATION",
+                "operator": "CONTAINS",
+                "value": mark,
+            }
+        ],
+    }
+    broad_search_args = {
+        **build_trademark_search_base_args(offices, limit_wo, plurals=True),
+        **phonetic_args(True),
+        "searchFields": [
+            {
+                "name": "WORD_MARK_SPECIFICATION",
+                "operator": "CONTAINS",
+                "value": mark,
+            }
+        ],
+    }
+    return {
+        "tool_purpose": "trademark-search/custom screening trademark search",
+        "exact_first": {"run_when": "always", "arguments": exact_search_args},
+        "broad_second": {
+            "run_when": "only if exact_first returns 5 or fewer records",
+            "arguments": broad_search_args,
+        },
+        "ranking": "Exact results first; fill remaining Top 5 from broad results.",
+        "follow_up": "Content and full-text links for Top 5 only; no trademark-goods unless user requested goods/spec details.",
+    }
+
+
 def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_result: Any) -> Dict[str, Any]:
     next_step = next_workflow_step_id(step_id)
     if step_id == "criteria":
@@ -464,16 +544,36 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
         return {
             "instructions": [
                 "Call build_trademark_knockout_execution_plan.",
-                "Use its normalized offices, routes, litigation guidance, and web-search guidance.",
+                "Use it only to normalize scope and confirm the sequence.",
+                "Do not run searches until the collect step.",
             ],
             "output": "execution_plan",
-            "success_criteria": "Execution plan is available; do not start drafting yet.",
+            "success_criteria": "Compact plan is available; agent still needs the collect step for concrete tool arguments.",
             "next_step_id": next_step,
             "next_tool_to_call": "continue_workflow",
             "done": False,
         }
 
     if step_id == "collect":
+        try:
+            normalized = search_inputs_from_step_context(criteria, previous_step_result)
+            trademark_searches = build_trademark_search_calls(normalized)
+            web_instruction = (
+                f'What do you find online related to "{normalized["mark"]}"? Return the 5 most relevant results.'
+                if normalized["web_search_enabled"]
+                else "Online presence search skipped because the user opted out."
+            )
+        except Exception as exc:
+            return {
+                "instructions": [
+                    "Complete the criteria and plan steps before collecting evidence.",
+                    "Pass search_criteria or previous_step_result.normalized_inputs into continue_workflow.",
+                ],
+                "error": str(exc),
+                "next_step_id": "criteria",
+                "next_tool_to_call": "continue_workflow",
+                "done": False,
+            }
         return {
             "instructions": [
                 "Run exact trademark-search first; run broad trademark-search only if exact returns 5 or fewer records.",
@@ -482,6 +582,13 @@ def workflow_step_payload(step_id: str, criteria: Dict[str, Any], previous_step_
                 "Do not call trademark-goods unless the user requested goods/spec details.",
                 "Run planned litigation searches and web search unless opted out.",
             ],
+            "normalized_inputs": normalized,
+            "trademark_searches": trademark_searches,
+            "litigation": {
+                "goal": "opposition checks for top owners and marks",
+                "defaults": {"case_domain": "TRADEMARK", "first_action_type": "OPPOSITION", "limit": 10},
+            },
+            "web_search": web_instruction,
             "output": "evidence",
             "success_criteria": "Evidence includes Top 5 trademark content/full-text links, search counts, litigation results, web findings or opt-out note, and errors if any.",
             "next_step_id": next_step,
@@ -564,87 +671,29 @@ def get_report_template(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_execution_plan(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    mark = clean_mark(arguments.get("mark", ""))
-    if not mark:
-        raise ValueError("mark is required.")
-    nice_classes = normalize_classes(arguments.get("nice_classes") or arguments.get("classes"))
-    offices, mapping_notes, limit_wo = normalize_jurisdictions(arguments.get("jurisdictions"))
-    match_scope = (arguments.get("match_scope") or "exact").strip().lower()
-    if match_scope not in {"exact", "contains"}:
-        match_scope = "exact"
-    web_pref = arguments.get("web_search_enabled", True)
-    if isinstance(web_pref, str):
-        web_enabled = web_pref.strip().lower() not in {"no", "false", "0", "n", "disabled", "skip", "off"}
-    elif web_pref is None:
-        web_enabled = True
-    else:
-        web_enabled = bool(web_pref)
-
-    exact_search_args = {
-        **build_trademark_search_base_args(offices, limit_wo, plurals=False),
-        "crossReferences": False,
-        "searchFields": [
-            {
-                "name": "EXACT_WORD_MARK_SPECIFICATION",
-                "operator": "CONTAINS",
-                "value": mark,
-            }
-        ],
-    }
-    broad_search_args = {
-        **build_trademark_search_base_args(offices, limit_wo, plurals=True),
-        **phonetic_args(True),
-        "searchFields": [
-            {
-                "name": "WORD_MARK_SPECIFICATION",
-                "operator": "CONTAINS",
-                "value": mark,
-            }
-        ],
-    }
+    normalized = normalize_search_inputs(arguments)
+    mark = normalized["mark"]
+    offices = normalized["registrationOfficeCodes"]
+    nice_classes = normalized["nice_classes"]
 
     return {
         "search_statement": (
             f"Search {mark} in {', '.join(offices)} for Nice class(es) {', '.join(nice_classes)}. "
-            "Use exact trademark-search first; broad trademark-search only if exact returns 5 or fewer records."
+            "Exact trademark-search first; broad trademark-search only if exact returns 5 or fewer records."
         ),
-        "normalized_inputs": {
-            "mark": mark,
-            "nice_classes": nice_classes,
-            "registrationOfficeCodes": offices,
-            "limitWOresultsToDesignated": limit_wo,
-            "match_scope": match_scope,
-            "web_search_enabled": web_enabled,
-            "mapping_notes": mapping_notes,
-        },
-        "trademark_searches": {
-            "tool_purpose": "trademark-search/custom screening trademark search",
-            "exact_first": {
-                "run_when": "always",
-                "arguments": exact_search_args,
-            },
-            "broad_second": {
-                "run_when": "only if exact_first returns 5 or fewer records",
-                "arguments": broad_search_args,
-            },
-            "ranking": "Exact results have priority; fill remaining Top 5 slots from broad results.",
-            "follow_up": "Fetch content and full-text links for Top 5 only; do not call trademark-goods unless user requested goods/spec details.",
-        },
-        "litigation": {
-            "goal": "opposition checks for top owners and marks",
-            "defaults": {"case_domain": "TRADEMARK", "first_action_type": "OPPOSITION", "limit": 10},
-            "rules": ["use AND-only calls", "for owners, prefer distinctive owner fragments as plaintiff"],
-        },
-        "online_presence": {
-            "enabled": web_enabled,
-            "search_guidance": (
-                f'What do you find online related to "{mark}"? Return the 5 most relevant results.'
-                if web_enabled
-                else "Online presence search skipped because the user opted out."
-            ),
-            "source": "agent browsing/web search, not CompuMark",
-        },
-        "post_collection": "De-duplicate IDs; select Top 5; fetch content/full-text for Top 5 only; skip goods unless requested.",
+        "normalized_inputs": normalized,
+        "sequence": [
+            "continue_workflow: collect",
+            "continue_workflow: report",
+            "continue_workflow: deliver",
+        ],
+        "collection_rules": [
+            "exact search first; broad only if exact count <=5",
+            "Top 5 only for content/full-text",
+            "skip trademark-goods unless requested",
+        ],
+        "next_step_id": "collect",
+        "next_tool_to_call": "continue_workflow",
     }
 
 
@@ -1092,9 +1141,111 @@ def generate_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+STRING_ARRAY_SCHEMA = {"type": "array", "items": {"type": "string"}}
+OBJECT_SCHEMA = {"type": "object", "additionalProperties": True}
+NULLABLE_STRING_SCHEMA = {"type": ["string", "null"]}
+
+START_WORKFLOW_OUTPUT_SCHEMA = {
+    "type": "object",
+    "description": "Short workflow orientation. Use first_step_id with continue_workflow.",
+    "required": ["workflow_id", "high_level_plan", "first_step_id", "next_tool_to_call"],
+    "properties": {
+        "workflow_id": {"type": "string"},
+        "goal": {"type": "string"},
+        "high_level_plan": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["step_id", "title"],
+                "properties": {"step_id": {"type": "string"}, "title": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+        "criteria_status": OBJECT_SCHEMA,
+        "first_step_id": {"type": "string"},
+        "next_tool_to_call": {"type": "string"},
+        "agent_contract": STRING_ARRAY_SCHEMA,
+    },
+    "additionalProperties": True,
+}
+
+CONTINUE_WORKFLOW_OUTPUT_SCHEMA = {
+    "type": "object",
+    "description": "Instructions for exactly one step. Follow next_step_id until done is true.",
+    "required": ["workflow_id", "current_step_id", "step_title", "instructions", "next_action", "done"],
+    "properties": {
+        "workflow_id": {"type": "string"},
+        "current_step_id": {"type": "string"},
+        "step_title": {"type": "string"},
+        "next_action": {"type": "string"},
+        "instructions": STRING_ARRAY_SCHEMA,
+        "success_criteria": {"type": "string"},
+        "next_step_id": NULLABLE_STRING_SCHEMA,
+        "next_tool_to_call": NULLABLE_STRING_SCHEMA,
+        "done": {"type": "boolean"},
+        "missing": STRING_ARRAY_SCHEMA,
+        "criteria": OBJECT_SCHEMA,
+        "normalized_inputs": OBJECT_SCHEMA,
+        "trademark_searches": OBJECT_SCHEMA,
+        "litigation": OBJECT_SCHEMA,
+        "web_search": {"type": "string"},
+        "output": {"type": "string"},
+        "error": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+REPORT_TEMPLATE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["template_markdown", "drafting_rules"],
+    "properties": {"template_markdown": {"type": "string"}, "drafting_rules": STRING_ARRAY_SCHEMA},
+    "additionalProperties": False,
+}
+
+EXECUTION_PLAN_OUTPUT_SCHEMA = {
+    "type": "object",
+    "description": "Compact scope plan. Concrete CompuMark arguments come from continue_workflow at collect.",
+    "required": ["search_statement", "normalized_inputs", "next_step_id", "next_tool_to_call"],
+    "properties": {
+        "search_statement": {"type": "string"},
+        "normalized_inputs": OBJECT_SCHEMA,
+        "sequence": STRING_ARRAY_SCHEMA,
+        "collection_rules": STRING_ARRAY_SCHEMA,
+        "next_step_id": {"type": "string"},
+        "next_tool_to_call": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
+VALIDATION_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["valid", "issues", "warnings"],
+    "properties": {"valid": {"type": "boolean"}, "issues": STRING_ARRAY_SCHEMA, "warnings": STRING_ARRAY_SCHEMA},
+    "additionalProperties": False,
+}
+
+PDF_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["pdf_path", "pdf_exists", "pdf_size_bytes"],
+    "properties": {
+        "pdf_path": {"type": "string"},
+        "pdf_url": NULLABLE_STRING_SCHEMA,
+        "download_the_report": NULLABLE_STRING_SCHEMA,
+        "pdf_exists": {"type": "boolean"},
+        "pdf_size_bytes": {"type": "integer"},
+        "markdown_path": NULLABLE_STRING_SCHEMA,
+        "markdown_url": NULLABLE_STRING_SCHEMA,
+        "template_path": {"type": "string"},
+        "pdf_generation_workflow": {"type": "string"},
+        "chatgpt_final_response_instruction": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+
 TOOLS: Dict[str, Dict[str, Any]] = {
     "start_workflow": {
-        "description": "Start the report workflow; returns a short plan and first step.",
+        "description": "Call first. Starts the report workflow and returns the step list plus first_step_id.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1118,10 +1269,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             },
             "additionalProperties": False,
         },
+        "outputSchema": START_WORKFLOW_OUTPUT_SCHEMA,
         "handler": start_workflow,
     },
     "continue_workflow": {
-        "description": "Return step instructions, success criteria, and next action.",
+        "description": "Call after each step. Returns instructions, success criteria, next_action, and next_step_id.",
         "inputSchema": {
             "type": "object",
             "required": ["workflow_id", "step_id"],
@@ -1147,15 +1299,17 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             },
             "additionalProperties": False,
         },
+        "outputSchema": CONTINUE_WORKFLOW_OUTPUT_SCHEMA,
         "handler": continue_workflow,
     },
     "get_trademark_knockout_report_template": {
-        "description": "Return report markdown template.",
+        "description": "Call during the report step before drafting the markdown report.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "outputSchema": REPORT_TEMPLATE_OUTPUT_SCHEMA,
         "handler": get_report_template,
     },
     "build_trademark_knockout_execution_plan": {
-        "description": "Normalize inputs and return compact CompuMark/web search plan.",
+        "description": "Call only in the plan step. Normalizes scope and points back to continue_workflow: collect.",
         "inputSchema": {
             "type": "object",
             "required": ["mark", "jurisdictions", "nice_classes"],
@@ -1184,20 +1338,22 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             },
             "additionalProperties": False,
         },
+        "outputSchema": EXECUTION_PLAN_OUTPUT_SCHEMA,
         "handler": build_execution_plan,
     },
     "validate_trademark_knockout_report": {
-        "description": "Validate report markdown before PDF generation.",
+        "description": "Call in the deliver step before PDF generation. Fix issues before rendering.",
         "inputSchema": {
             "type": "object",
             "required": ["markdown"],
             "properties": {"markdown": {"type": "string", "description": "Report markdown."}},
             "additionalProperties": False,
         },
+        "outputSchema": VALIDATION_OUTPUT_SCHEMA,
         "handler": validate_report,
     },
     "generate_clarivate_report_pdf": {
-        "description": "Generate Clarivate-template PDF.",
+        "description": "Call in the deliver step after validation passes. Returns the generated PDF path/URL.",
         "inputSchema": {
             "type": "object",
             "required": ["subject"],
@@ -1222,6 +1378,7 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             },
             "additionalProperties": False,
         },
+        "outputSchema": PDF_OUTPUT_SCHEMA,
         "handler": generate_pdf,
     },
 }
@@ -1248,6 +1405,7 @@ def handle_tools_list(message_id: Any) -> Dict[str, Any]:
                     "name": name,
                     "description": spec["description"],
                     "inputSchema": spec["inputSchema"],
+                    **({"outputSchema": spec["outputSchema"]} if "outputSchema" in spec else {}),
                 }
                 for name, spec in TOOLS.items()
             ]
