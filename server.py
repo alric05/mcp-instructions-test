@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Small MCP server for a trademark knockout report POC.
 
-This version uses MCP prompts and resources to put the workflow instructions in
-context instead of asking the agent to call step-by-step instruction tools.
+Hybrid prompt/resource/tool version for ChatGPT-style clients.
 
 The server exposes:
-1. One prompt: trademark_knockout_report
-   - Starts the workflow and embeds the workflow + report-template resources.
-2. Two resources:
+1. One kickoff tool: prepare_trademark_knockout_report
+   - Use this first when a user asks to run a trademark knockout, clearance,
+     brand availability, or knockout report. It returns the workflow
+     instructions and report template in one tool result.
+2. One prompt: trademark_knockout_report
+   - For MCP clients that expose prompt pickers; it embeds the same resources.
+3. Two resources:
    - workflow instructions
    - markdown report template
-3. One tool:
-   - generate_clarivate_report_pdf, the final action that renders the report.
+4. One final action tool:
+   - generate_clarivate_report_pdf, which renders the completed markdown.
 
 This is intentionally simple POC code, not a production-grade MCP framework.
 """
@@ -46,7 +49,7 @@ except ImportError:  # pragma: no cover - runtime dependency guard
 
 
 SERVER_NAME = "trademark-knockout-report-workflow"
-SERVER_VERSION = "0.3.0-prompts-resources-poc"
+SERVER_VERSION = "0.4.0-hybrid-poc"
 WORKFLOW_NAME = "trademark_knockout_report"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -368,13 +371,122 @@ def clean_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
-def known_criteria_from_prompt_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    criteria = parse_criteria_json(arguments.get("criteria_json"))
-    for key in ["mark", "jurisdictions", "nice_classes", "language"]:
+def known_criteria_from_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge criteria from a loose tool/prompt argument object.
+
+    This is deliberately permissive for the POC because different MCP hosts may
+    shape tool arguments differently. Direct fields win over nested criteria.
+    """
+    criteria: Dict[str, Any] = {}
+
+    for key in ["criteria", "search_criteria"]:
+        nested = arguments.get(key)
+        if isinstance(nested, dict):
+            criteria.update(nested)
+
+    criteria.update(parse_criteria_json(arguments.get("criteria_json")))
+    for key in [
+        "mark",
+        "jurisdictions",
+        "territories",
+        "offices",
+        "registration_offices",
+        "nice_classes",
+        "classes",
+        "nice_class_numbers",
+        "int_class_numbers",
+        "language",
+        "type",
+        "match_scope",
+        "notes",
+    ]:
         value = arguments.get(key)
         if value not in (None, ""):
             criteria[key] = value
     return criteria
+
+
+def known_criteria_from_prompt_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    return known_criteria_from_args(arguments)
+
+
+def has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def criteria_value(criteria: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = criteria.get(key)
+        if has_value(value):
+            return value
+    return None
+
+
+def first_missing_essential(criteria: Dict[str, Any]) -> Optional[str]:
+    if not has_value(criteria_value(criteria, "mark")):
+        return "mark"
+    if not has_value(criteria_value(criteria, "jurisdictions", "territories", "offices", "registration_offices")):
+        return "jurisdictions"
+    if not has_value(criteria_value(criteria, "nice_classes", "classes", "nice_class_numbers", "int_class_numbers")):
+        return "nice_classes"
+    return None
+
+
+def clarifying_question(missing: Optional[str]) -> Optional[str]:
+    if missing == "mark":
+        return "What exact word mark should I search?"
+    if missing == "jurisdictions":
+        return "Which territories or registration offices should I cover, for example EU, UK, US, or WO?"
+    if missing == "nice_classes":
+        return "Which Nice classes should I cover?"
+    return None
+
+
+def prepare_trademark_knockout_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Kickoff tool for ChatGPT-style clients.
+
+    The old server made the agent call instruction tools step by step. This POC
+    returns the whole workflow context in one model-controlled tool call, while
+    also keeping the same context available through MCP prompts/resources.
+    """
+    criteria = known_criteria_from_args(arguments)
+    missing = first_missing_essential(criteria)
+    ready = missing is None
+
+    if ready:
+        next_action = (
+            "All essential criteria appear to be present. Use the available CompuMark "
+            "trademark and litigation tools, draft the markdown report using the template, "
+            "then call generate_clarivate_report_pdf with subject set to the searched mark."
+        )
+    else:
+        next_action = "Ask the user the clarifying_question. Do not run CompuMark searches yet."
+
+    return {
+        "workflow_name": WORKFLOW_NAME,
+        "status": "ready" if ready else "needs_clarification",
+        "known_criteria": criteria,
+        "missing_required_field": missing,
+        "clarifying_question": clarifying_question(missing),
+        "next_action": next_action,
+        "resource_uris": {
+            "workflow_instructions": WORKFLOW_INSTRUCTIONS_URI,
+            "report_template": REPORT_TEMPLATE_URI,
+        },
+        "instructions": WORKFLOW_INSTRUCTIONS,
+        "report_template": REPORT_TEMPLATE_RESOURCE,
+        "final_pdf_tool": "generate_clarivate_report_pdf",
+        "note": (
+            "This kickoff tool is the ChatGPT-friendly trigger. MCP clients with a prompt picker "
+            "can alternatively use the prompt named trademark_knockout_report."
+        ),
+    }
 
 
 def criteria_markdown(criteria: Dict[str, Any]) -> str:
@@ -826,6 +938,38 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 NULLABLE_STRING = {"type": ["string", "null"]}
+OBJECT = {"type": "object", "additionalProperties": True}
+STRING_OR_ARRAY = {"type": ["string", "array", "null"], "items": {"type": "string"}}
+
+PREPARE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": [
+        "workflow_name",
+        "status",
+        "known_criteria",
+        "missing_required_field",
+        "clarifying_question",
+        "next_action",
+        "resource_uris",
+        "instructions",
+        "report_template",
+        "final_pdf_tool",
+    ],
+    "properties": {
+        "workflow_name": {"type": "string"},
+        "status": {"type": "string", "enum": ["ready", "needs_clarification"]},
+        "known_criteria": OBJECT,
+        "missing_required_field": NULLABLE_STRING,
+        "clarifying_question": NULLABLE_STRING,
+        "next_action": {"type": "string"},
+        "resource_uris": OBJECT,
+        "instructions": {"type": "string"},
+        "report_template": {"type": "string"},
+        "final_pdf_tool": {"type": "string"},
+        "note": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
 
 PDF_OUTPUT_SCHEMA = {
     "type": "object",
@@ -845,7 +989,43 @@ PDF_OUTPUT_SCHEMA = {
 }
 
 TOOLS: Dict[str, Dict[str, Any]] = {
+    "prepare_trademark_knockout_report": {
+        "title": "Prepare trademark knockout report",
+        "description": (
+            "Use this first when the user asks to run, start, prepare, create, or generate a trademark knockout report, "
+            "brand clearance report, trademark clearance search, or brand availability report. It returns the complete "
+            "workflow instructions and markdown report template in one response; it does not run database searches."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mark": {"type": "string", "description": "Exact word mark to search."},
+                "jurisdictions": {
+                    **STRING_OR_ARRAY,
+                    "description": "Territories or registration offices, for example EU, UK, US, WO, or EM.",
+                },
+                "nice_classes": {
+                    **STRING_OR_ARRAY,
+                    "description": "Nice class numbers, for example 9, 42 or ['9', '42'].",
+                },
+                "language": {"type": "string", "description": "Visible report language. Defaults to the user's language."},
+                "type": {"type": "string", "description": "Optional: Word, Logo, or Both."},
+                "match_scope": {"type": "string", "description": "Optional: Exact only, Contains, Phonetic, Plurals, etc."},
+                "notes": {"type": "string", "description": "Optional limitations, assumptions, or exclusions."},
+                "criteria": {
+                    "type": "object",
+                    "description": "Optional object containing known criteria such as mark, jurisdictions, and nice_classes.",
+                    "additionalProperties": True,
+                },
+                "criteria_json": {"type": "string", "description": "Optional JSON object with known criteria."},
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": PREPARE_OUTPUT_SCHEMA,
+        "handler": prepare_trademark_knockout_report,
+    },
     "generate_clarivate_report_pdf": {
+        "title": "Generate Clarivate report PDF",
         "description": "Generate the final PDF using the Clarivate template: template cover, generated report body, template closing page.",
         "inputSchema": {
             "type": "object",
@@ -886,8 +1066,10 @@ def handle_initialize(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]
             },
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
-                "Use the MCP prompt 'trademark_knockout_report' to start the workflow. "
-                "The prompt embeds the workflow and report-template resources. "
+                "For ChatGPT-style clients, call the tool 'prepare_trademark_knockout_report' first "
+                "when the user asks for a trademark knockout or clearance report. "
+                "For MCP clients with prompt pickers, the prompt 'trademark_knockout_report' "
+                "embeds the same workflow and report-template resources. "
                 "Only call the tool 'generate_clarivate_report_pdf' after drafting the completed markdown report."
             ),
         },
@@ -895,20 +1077,18 @@ def handle_initialize(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]
 
 
 def handle_tools_list(message_id: Any) -> Dict[str, Any]:
-    return json_rpc_result(
-        message_id,
-        {
-            "tools": [
-                {
-                    "name": name,
-                    "description": spec["description"],
-                    "inputSchema": spec["inputSchema"],
-                    "outputSchema": spec["outputSchema"],
-                }
-                for name, spec in TOOLS.items()
-            ]
-        },
-    )
+    tools = []
+    for name, spec in TOOLS.items():
+        descriptor = {
+            "name": name,
+            "description": spec["description"],
+            "inputSchema": spec["inputSchema"],
+            "outputSchema": spec["outputSchema"],
+        }
+        if spec.get("title"):
+            descriptor["title"] = spec["title"]
+        tools.append(descriptor)
+    return json_rpc_result(message_id, {"tools": tools})
 
 
 def handle_tools_call(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -993,6 +1173,14 @@ def run_stdio() -> int:
 
 
 def self_test() -> int:
+    prepared = prepare_trademark_knockout_report(
+        {
+            "mark": "NOVALYTIC",
+            "jurisdictions": "EU, UK",
+            "nice_classes": "9, 42",
+            "language": "English",
+        }
+    )
     prompt = get_prompt(
         {
             "name": WORKFLOW_NAME,
@@ -1008,6 +1196,9 @@ def self_test() -> int:
         json.dumps(
             {
                 "tools": list(TOOLS.keys()),
+                "prepare_status": prepared["status"],
+                "prepare_missing_required_field": prepared["missing_required_field"],
+                "prepare_resource_uris": prepared["resource_uris"],
                 "prompts": [prompt_metadata(item) for item in PROMPTS.values()],
                 "resources": [resource_metadata(item) for item in RESOURCES.values()],
                 "prompt_message_summary": [
