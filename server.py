@@ -802,7 +802,7 @@ PDF_OUTPUT_SCHEMA = {
 
 TOOLS: Dict[str, Dict[str, Any]] = {
     "start_trademark_knockout_report": {
-        "description": "Start the trademark knockout report workflow. Returns the first step name and how to fetch its instructions.",
+        "description": "Mandatory entrypoint for trademark knockout, brand clearance, clearance search. Returns the first step name and how to fetch its instructions.",
         "inputSchema": {
             "type": "object",
             "properties": {
