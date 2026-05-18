@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Small MCP server for a trademark knockout report POC.
+"""Small tools-only MCP server for a trademark knockout report POC.
 
-Hybrid prompt/resource/tool version for ChatGPT-style clients.
+This version is optimized for ChatGPT-style clients, where the model reliably
+starts work by calling tools rather than by letting the user select MCP prompts.
 
-The server exposes:
-1. One kickoff tool: prepare_trademark_knockout_report
-   - Use this first when a user asks to run a trademark knockout, clearance,
-     brand availability, or knockout report. It returns the workflow
-     instructions and report template in one tool result.
-2. One prompt: trademark_knockout_report
-   - For MCP clients that expose prompt pickers; it embeds the same resources.
-3. Two resources:
-   - workflow instructions
-   - markdown report template
-4. One final action tool:
-   - generate_clarivate_report_pdf, which renders the completed markdown.
+The server exposes two tools only:
+
+1. prepare_trademark_knockout_report
+   - Mandatory kickoff/context tool.
+   - Returns explicit workflow instructions and the exact report template.
+   - Tells the agent what is missing, or that it is ready to proceed.
+
+2. generate_clarivate_report_pdf
+   - Mandatory final tool.
+   - Validates that the report still follows the required template shape.
+   - Renders the completed markdown into the Clarivate PDF template.
 
 This is intentionally simple POC code, not a production-grade MCP framework.
 """
@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - runtime dependency guard
 
 
 SERVER_NAME = "trademark-knockout-report-workflow"
-SERVER_VERSION = "0.4.0-hybrid-poc"
+SERVER_VERSION = "0.5.0-tools-only-poc"
 WORKFLOW_NAME = "trademark_knockout_report"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -71,8 +71,56 @@ SUBTITLE_FONT_SIZE = 22
 LINK_RE = re.compile(r"\[([^\]]+)]\((https?://[^)\s]+)\)")
 PIPE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
-WORKFLOW_INSTRUCTIONS_URI = "trademark-knockout://workflow/instructions.md"
-REPORT_TEMPLATE_URI = "trademark-knockout://workflow/report-template.md"
+REQUIRED_MARKDOWN_HEADINGS = [
+    "# AI Generated Trademark Knockout Search Report (Demo only)",
+    "## 1. Search Criteria",
+    "## 2. CompuMark Search Results",
+    "### 2.1 Summary",
+    "### 2.2 Most Relevant Trademark References (Top 5)",
+    "### 2.3 Litigation Activity",
+    "### 2.4 Trademark Assessment Comments",
+    "## 3. Key Takeaways",
+    "Disclaimer",
+]
+
+COMMON_TEMPLATE_PLACEHOLDERS = [
+    "[MARK]",
+    "[DATE]",
+    "[Word / Logo / Both]",
+    "[EU / UK / US / WIPO designations / Other]",
+    "[CLASS NUMBERS, if known]",
+    "[Exact only / Contains / Phonetic / Plurals]",
+    "[Any limitations, exclusions, or assumptions]",
+    "[NUMBER / APPROX.]",
+    "[LIST]",
+    "[🟢 Low / 🟠 Medium / 🔴 High]",
+    "[VERBAL ELEMENT 1]",
+    "[VERBAL ELEMENT 2]",
+    "[VERBAL ELEMENT 3]",
+    "[VERBAL ELEMENT 4]",
+    "[VERBAL ELEMENT 5]",
+    "[Status]",
+    "[OFFICE]",
+    "[CLASS]",
+    "[NUMBER]",
+    "[OWNER]",
+    "FULL_TEXT_URL",
+    "[PARTY 1 vs PARTY 2]",
+    "[Opposition / Infringement / Cancellation]",
+    "[COUNTRY]",
+    "[Active / Concluded]",
+    "[Summary]",
+    "[State whether exact matches were found in the main class.]",
+    "[State whether similar or phonetic matches were found.]",
+    "[State whether any exact matches were found outside the main class, if searched.]",
+    "[State which results appear most material and why.]",
+    "[State whether litigation activity was found, the type of case, and if it adds risk.]",
+    "[🟢 Low / 🟠 Medium / 🔴 High concern]",
+    "[Key takeaway 1: concise conclusion on trademark database results.]",
+    "[Key takeaway 2: concise conclusion on relevant litigation, if any.]",
+    "[Key takeaway 3: note on main legal or commercial risk.]",
+    "[Key takeaway 4: optional recommendation, e.g. proceed / proceed with caution / consider narrowing / consider alternate mark.]",
+]
 
 REPORT_TEMPLATE = """# AI Generated Trademark Knockout Search Report (Demo only)
 
@@ -148,118 +196,72 @@ Disclaimer
 This report is produced for informational purposes only and does not constitute legal advice. Trademark clearance searches are not exhaustive and do not guarantee the availability or registrability of a mark. Always consult a qualified trademark attorney before filing.
 """
 
-WORKFLOW_INSTRUCTIONS = """# Trademark Knockout Report Workflow
+MUST_FOLLOW_RULES = [
+    "This workflow is mandatory for trademark knockout, clearance, brand availability, or similar report requests.",
+    "Call prepare_trademark_knockout_report first for those requests. Do not skip this kickoff tool.",
+    "If prepare_trademark_knockout_report returns status='needs_clarification', ask only the clarifying_question and stop. Do not run searches yet.",
+    "If status='ready', follow every workflow step in order before giving a final answer.",
+    "Do not invent evidence. Use source-backed facts from CompuMark tools only, and make uncertainty visible.",
+    "Do not use the CompuMark knockout-search tool. Use the trademark-search, trademark-content, and litigation-search tools as instructed.",
+    "Do not change the report template headings, numbering, section order, or required Top 5 table shape.",
+    "The Top 5 trademark references table must contain exactly five data rows. Use 'No further material source-backed finding' rows if fewer than five material records exist.",
+    "The final user-facing reply must not be a loose text report. It must finish with the PDF generated by generate_clarivate_report_pdf.",
+    "Call generate_clarivate_report_pdf as the final action after drafting the markdown. Return download_the_report or pdf_url if present; otherwise return pdf_path and say no public URL is configured.",
+]
 
-Use this resource as the operating instructions for the trademark knockout report POC.
-The old step-by-step instruction tools are intentionally not exposed in this version.
-The workflow should be followed from context after this resource is attached or read.
+WORKFLOW_STEPS = [
+    "1. Confirm exact mark, territories or registration offices, and Nice classes.",
+    "2. Run limited CompuMark trademark searches and select the five most relevant records.",
+    "3. Fetch trademark-content for selected records and create links labeled exactly 'full-text'.",
+    "4. Run a light CompuMark litigation check for the searched mark, top references, or relevant owners.",
+    "5. Fill the provided markdown template without changing its structure.",
+    "6. Call generate_clarivate_report_pdf with subject set to the searched mark and markdown set to the completed report.",
+    "7. Reply to the user with the generated PDF link/path, not with an unfinished draft.",
+]
 
-## Goal
+TRADEMARK_SEARCH_RULES = [
+    "Perform at most three trademark searches: exact without phonetics, exact with phonetics, contains with phonetics.",
+    "Only proceed to the next search if fewer than five useful results have been found.",
+    "Start with the exact search in the requested offices and Nice classes.",
+    "Only search using the verbal element given by the user. Do not invent spelling variants or alternate marks.",
+    "Select records by exactness, territory/office relevance, class overlap, active/live status, owner relevance, and apparent commercial significance.",
+    "For selected IDs, fetch trademark-content and create CompuMark full-text links labeled exactly 'full-text'.",
+    "Do not fetch goods for this POC.",
+    "Avoid country-code lookup tools if possible. Use common office/country codes from internal knowledge where practical.",
+    "For INT_CLASS_NUMBER, use operator 'EQUALS' with a comma-separated value such as '3,4,5' to search multiple Nice classes in one request.",
+    "If a specific country is specified, also include 'WO' with limitWOresultsToDesignated=true in search parameters.",
+    "If an EU country is specified, also include 'EM' and 'WO' with limitWOresultsToDesignated=true in search parameters.",
+]
 
-Create an AI Generated Trademark Knockout Search Report and render it as a Clarivate-template PDF.
-Use CompuMark trademark and litigation evidence. Keep the report concise, source-backed, and visibly uncertain where the evidence is incomplete.
+LITIGATION_SEARCH_RULES = [
+    "Use the CompuMark litigation-search tool lightly; do not over-search.",
+    "Search material disputes involving the searched mark, strongest matching verbal elements, or owners from the top references.",
+    "Keep only cases that could affect risk. Summarize parties, jurisdiction, status, case type, and why each case matters.",
+    "If there is no material litigation, say so plainly in the report.",
+    "Always use this first-action condition in the first query: {'field': 'FIRST_ACTION_TYPE', 'op': 'EQ', 'value': 'OPPOSITION'}.",
+    "When filtering on party name, also include: {'field': 'PARTY_IS_EX_OFFICIO', 'op': 'EQ', 'value': False}.",
+    "Avoid OR conditions. Split into multiple separate queries that use only AND conditions.",
+    "When using group_by, only order_by fields that are also grouped or aggregated.",
+    "The order_by clause must be a dict, for example: {'FIRST_ACTION_DATE': 'DESC'}.",
+]
 
-## Workflow order
+REPORT_DRAFTING_RULES = [
+    "Use the report_template returned by prepare_trademark_knockout_report.",
+    "Keep every heading, section number, section order, table header, and disclaimer structure intact.",
+    "Fill placeholders with source-backed evidence. Do not leave obvious placeholders such as [MARK] or [DATE] in the final markdown.",
+    "Use one of these exact risk labels: 🟢 Low, 🟠 Medium, or 🔴 High.",
+    "Keep the Top 5 table at exactly five data rows. If fewer than five records exist, fill remaining rows with 'No further material source-backed finding'.",
+    "Use CompuMark links as [full-text](url). The visible link label must be exactly 'full-text'.",
+    "Keep the report concise. Do not add unrequested sections or change the template into a narrative memo.",
+]
 
-1. Confirm search criteria.
-2. Collect CompuMark trademark evidence.
-3. Check relevant litigation.
-4. Draft the report markdown using the report-template resource.
-5. Call `generate_clarivate_report_pdf` and return the generated link or local path.
-
-## 1. Confirm search criteria
-
-Confirm only the essentials:
-
-- Exact mark.
-- Territories or registration offices.
-- Nice classes.
-
-If one essential item is missing, ask only for the first missing item. Do not run CompuMark searches before the essentials are known.
-Optional details such as word/logo/both, match scope, and notes can be captured when available, but should not block the workflow unless they materially affect the search.
-
-## 2. Collect CompuMark trademark evidence
-
-Use the CompuMark trademark-search tool to find the most relevant records. Do not use the knockout-search tool.
-Perform at most three trademark searches:
-
-1. Exact search without phonetics.
-2. Exact search with phonetics.
-3. Contains search with phonetics.
-
-Only proceed to the next search if you have fewer than five useful results. Start with the exact search in the requested offices and classes.
-Only search using the verbal element provided by the user; do not invent spelling variants or alternate marks.
-
-Select five records by:
-
-- Exactness or similarity of the verbal element.
-- Territory or registration office relevance.
-- Nice class overlap.
-- Active/live status.
-- Owner relevance and apparent commercial significance.
-
-For the selected IDs, fetch trademark-content and create full-text links labeled exactly `full-text`.
-Do not fetch goods for this POC.
-
-CompuMark search notes:
-
-- Avoid country-code lookup tools if possible. Use common country/office codes from internal knowledge when possible.
-- For `INT_CLASS_NUMBER`, use operator `EQUALS` with a comma-separated value such as `3,4,5` to search multiple Nice classes in one request.
-- If a specific country is specified, also include `WO` with `limitWOresultsToDesignated: true` in search parameters.
-- If an EU country is specified, also include `EM` and `WO` with `limitWOresultsToDesignated: true` in search parameters.
-
-## 3. Check relevant litigation
-
-Use the CompuMark litigation-search tool lightly for trademark disputes involving:
-
-- The searched mark.
-- The strongest matching verbal elements.
-- Owners from the top trademark references.
-
-Keep only cases that could affect risk. Summarize parties, jurisdiction, status, case type, and why each case matters. If there is no material litigation, say so plainly.
-
-Litigation search constraints:
-
-- Always use this condition on first action type in the first query: `{'field': 'FIRST_ACTION_TYPE', 'op': 'EQ', 'value': 'OPPOSITION'}`.
-- When filtering on party name, also include: `{'field': 'PARTY_IS_EX_OFFICIO', 'op': 'EQ', 'value': False}`.
-- Avoid queries with OR conditions. Split them into separate queries that use only AND conditions.
-- When using `group_by`, only `order_by` fields that are also grouped or aggregated.
-- The `order_by` clause is a dict. Valid example: `order_by: {'FIRST_ACTION_DATE': 'DESC'}`.
-
-## 4. Draft the report markdown
-
-Use the `trademark-knockout://workflow/report-template.md` resource.
-Keep the section structure and numbering.
-Use source-backed facts only and make uncertainty visible.
-Keep the Top 5 trademark references table at exactly five data rows.
-If fewer than five material references exist, fill remaining rows with a simple row such as `No further material source-backed finding`.
-Use CompuMark links as `[full-text](url)`.
-Use risk labels exactly as one of: `🟢 Low`, `🟠 Medium`, `🔴 High`.
-Write the visible report in the user's language unless they asked otherwise.
-
-## 5. Generate the PDF
-
-Call `generate_clarivate_report_pdf` with:
-
-- `subject`: the searched mark.
-- `markdown`: the completed report markdown.
-
-Then answer the user with `download_the_report` or `pdf_url` if present. If no public URL is configured, return the local `pdf_path` and mention that no public URL is configured.
-"""
-
-REPORT_TEMPLATE_RESOURCE = """# Trademark Knockout Report Template
-
-Rules:
-
-- Keep the section structure and numbering.
-- Use source-backed facts only; make uncertainty visible.
-- Keep the Top 5 trademark references table at exactly five data rows.
-- Use `full-text` as the label for CompuMark full-text links.
-- Write the visible report in the user's language unless they asked otherwise.
-
----
-
-""" + REPORT_TEMPLATE
+FINAL_RESPONSE_RULES = [
+    "After report drafting, call generate_clarivate_report_pdf. This is mandatory.",
+    "Do not present the final report to the user as plain markdown instead of generating the PDF.",
+    "If the PDF tool returns download_the_report or pdf_url, give that to the user.",
+    "If there is no public URL, give pdf_path and mention that no public URL is configured.",
+    "Keep the final response concise and centered on the generated PDF.",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +270,6 @@ Rules:
 
 
 def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
-    """Return a normal MCP tool result.
-
-    Prompts and resources do not use this wrapper; only tools/call does.
-    """
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
     result: Dict[str, Any] = {"content": [{"type": "text", "text": text}], "isError": is_error}
     if not is_error and isinstance(payload, (dict, list)):
@@ -291,68 +289,12 @@ def json_rpc_error(message_id: Any, code: int, message: str, data: Any = None) -
 
 
 # ---------------------------------------------------------------------------
-# Prompt and resource helpers
+# Kickoff/context tool
 # ---------------------------------------------------------------------------
 
 
-RESOURCES: Dict[str, Dict[str, Any]] = {
-    WORKFLOW_INSTRUCTIONS_URI: {
-        "uri": WORKFLOW_INSTRUCTIONS_URI,
-        "name": "workflow-instructions.md",
-        "title": "Trademark knockout workflow instructions",
-        "description": "End-to-end instructions for the trademark knockout report workflow.",
-        "mimeType": "text/markdown",
-        "text": WORKFLOW_INSTRUCTIONS,
-        "annotations": {"audience": ["assistant"], "priority": 1.0},
-    },
-    REPORT_TEMPLATE_URI: {
-        "uri": REPORT_TEMPLATE_URI,
-        "name": "report-template.md",
-        "title": "Trademark knockout markdown report template",
-        "description": "Markdown template and rules for the final report body.",
-        "mimeType": "text/markdown",
-        "text": REPORT_TEMPLATE_RESOURCE,
-        "annotations": {"audience": ["assistant"], "priority": 0.9},
-    },
-}
-
-PROMPTS: Dict[str, Dict[str, Any]] = {
-    WORKFLOW_NAME: {
-        "name": WORKFLOW_NAME,
-        "title": "Trademark knockout report",
-        "description": "Run the trademark knockout report workflow using embedded MCP resources for instructions and report structure.",
-        "arguments": [
-            {"name": "mark", "description": "Exact word mark to search.", "required": False},
-            {"name": "jurisdictions", "description": "Territories or offices, for example EU, UK, US, WO.", "required": False},
-            {"name": "nice_classes", "description": "Nice class numbers, comma-separated if multiple.", "required": False},
-            {"name": "language", "description": "Visible report language. Defaults to the user's language.", "required": False},
-            {"name": "criteria_json", "description": "Optional JSON object with known criteria.", "required": False},
-        ],
-    }
-}
-
-
-def resource_metadata(resource: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the resource fields used by resources/list."""
-    return {
-        key: value
-        for key, value in resource.items()
-        if key in {"uri", "name", "title", "description", "mimeType", "annotations"}
-    }
-
-
-def resource_content(uri: str) -> Dict[str, Any]:
-    resource = RESOURCES[uri]
-    return {"uri": uri, "mimeType": resource["mimeType"], "text": resource["text"]}
-
-
-def prompt_metadata(prompt: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "name": prompt["name"],
-        "title": prompt.get("title"),
-        "description": prompt.get("description"),
-        "arguments": prompt.get("arguments", []),
-    }
+def clean_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
 
 
 def parse_criteria_json(value: Any) -> Dict[str, Any]:
@@ -367,15 +309,11 @@ def parse_criteria_json(value: Any) -> Dict[str, Any]:
         return {"criteria_json_parse_error": "criteria_json was provided but was not valid JSON."}
 
 
-def clean_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())
-
-
 def known_criteria_from_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge criteria from a loose tool/prompt argument object.
+    """Merge criteria from loose tool arguments.
 
-    This is deliberately permissive for the POC because different MCP hosts may
-    shape tool arguments differently. Direct fields win over nested criteria.
+    The function is permissive on purpose because different clients may infer
+    slightly different argument shapes from natural language.
     """
     criteria: Dict[str, Any] = {}
 
@@ -385,6 +323,7 @@ def known_criteria_from_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
             criteria.update(nested)
 
     criteria.update(parse_criteria_json(arguments.get("criteria_json")))
+
     for key in [
         "mark",
         "jurisdictions",
@@ -403,11 +342,8 @@ def known_criteria_from_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
         value = arguments.get(key)
         if value not in (None, ""):
             criteria[key] = value
+
     return criteria
-
-
-def known_criteria_from_prompt_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    return known_criteria_from_args(arguments)
 
 
 def has_value(value: Any) -> bool:
@@ -449,24 +385,20 @@ def clarifying_question(missing: Optional[str]) -> Optional[str]:
 
 
 def prepare_trademark_knockout_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Kickoff tool for ChatGPT-style clients.
-
-    The old server made the agent call instruction tools step by step. This POC
-    returns the whole workflow context in one model-controlled tool call, while
-    also keeping the same context available through MCP prompts/resources.
-    """
+    """Mandatory kickoff tool for trademark knockout report requests."""
     criteria = known_criteria_from_args(arguments)
     missing = first_missing_essential(criteria)
     ready = missing is None
 
     if ready:
         next_action = (
-            "All essential criteria appear to be present. Use the available CompuMark "
-            "trademark and litigation tools, draft the markdown report using the template, "
-            "then call generate_clarivate_report_pdf with subject set to the searched mark."
+            "Proceed with the workflow now. Use the separate CompuMark tools to collect trademark and litigation evidence, "
+            "draft the report in the exact provided template, then call generate_clarivate_report_pdf before replying to the user."
         )
     else:
-        next_action = "Ask the user the clarifying_question. Do not run CompuMark searches yet."
+        next_action = (
+            "Ask the user only the clarifying_question and stop. Do not run CompuMark searches and do not draft or generate a report yet."
+        )
 
     return {
         "workflow_name": WORKFLOW_NAME,
@@ -475,82 +407,100 @@ def prepare_trademark_knockout_report(arguments: Dict[str, Any]) -> Dict[str, An
         "missing_required_field": missing,
         "clarifying_question": clarifying_question(missing),
         "next_action": next_action,
-        "resource_uris": {
-            "workflow_instructions": WORKFLOW_INSTRUCTIONS_URI,
-            "report_template": REPORT_TEMPLATE_URI,
-        },
-        "instructions": WORKFLOW_INSTRUCTIONS,
-        "report_template": REPORT_TEMPLATE_RESOURCE,
+        "must_follow_rules": MUST_FOLLOW_RULES,
+        "workflow_steps": WORKFLOW_STEPS,
+        "compumark_trademark_search_rules": TRADEMARK_SEARCH_RULES,
+        "compumark_litigation_search_rules": LITIGATION_SEARCH_RULES,
+        "report_drafting_rules": REPORT_DRAFTING_RULES,
+        "final_response_rules": FINAL_RESPONSE_RULES,
+        "report_template": REPORT_TEMPLATE,
         "final_pdf_tool": "generate_clarivate_report_pdf",
-        "note": (
-            "This kickoff tool is the ChatGPT-friendly trigger. MCP clients with a prompt picker "
-            "can alternatively use the prompt named trademark_knockout_report."
+        "final_response_instruction": (
+            "The final answer to the end user must include the PDF produced by generate_clarivate_report_pdf. "
+            "Use download_the_report or pdf_url when available; otherwise use pdf_path and mention that no public URL is configured."
         ),
     }
 
 
-def criteria_markdown(criteria: Dict[str, Any]) -> str:
-    if not criteria:
-        return "No criteria were provided in the prompt arguments. Ask for the first missing essential item."
-
-    rows = []
-    for key in ["mark", "jurisdictions", "nice_classes", "language", "type", "match_scope", "notes"]:
-        if key in criteria and criteria[key] not in (None, ""):
-            rows.append(f"- {key}: {criteria[key]}")
-    for key, value in criteria.items():
-        if key not in {"mark", "jurisdictions", "nice_classes", "language", "type", "match_scope", "notes"}:
-            rows.append(f"- {key}: {value}")
-    return "\n".join(rows) if rows else "Criteria were provided, but no recognized fields were populated."
+# ---------------------------------------------------------------------------
+# Markdown validation guardrails
+# ---------------------------------------------------------------------------
 
 
-def build_workflow_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    criteria = known_criteria_from_prompt_args(arguments)
-    mark = clean_text(criteria.get("mark")) or "[missing]"
+def top5_trademark_table_rows(markdown_text: str) -> Optional[List[List[str]]]:
+    heading = "### 2.2 Most Relevant Trademark References (Top 5)"
+    if heading not in markdown_text:
+        return None
 
-    starter_text = f"""Run the trademark knockout report workflow.
+    after_heading = markdown_text.split(heading, 1)[1]
+    section_lines: List[str] = []
+    for raw_line in after_heading.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("### ") or line.startswith("## "):
+            break
+        section_lines.append(line)
 
-Known criteria:
-{criteria_markdown(criteria)}
+    table_lines = [line.strip() for line in section_lines if is_table_line(line.strip())]
+    rows = normalize_table(table_lines)
+    return rows or None
 
-Use the embedded MCP resources in this prompt as the workflow source of truth:
 
-- {WORKFLOW_INSTRUCTIONS_URI}
-- {REPORT_TEMPLATE_URI}
+def validate_report_markdown(markdown_text: str) -> Dict[str, Any]:
+    """Small, opinionated POC validation to stop obvious agent drift.
 
-Start by checking whether the essentials are present: exact mark, territories/offices, and Nice classes.
-If any essential item is missing, ask only for the first missing item.
-If all essentials are present, use the available CompuMark tools to collect evidence, draft the markdown report, then call `generate_clarivate_report_pdf` with `subject` set to `{mark}`.
-"""
+    This intentionally checks only the structural requirements that matter most:
+    required headings, the exact Top 5 table shape, and unresolved template
+    placeholders. It is not a full markdown parser.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    for heading in REQUIRED_MARKDOWN_HEADINGS:
+        if heading not in markdown_text:
+            errors.append(f"Missing required template heading or marker: {heading}")
+
+    top5_rows = top5_trademark_table_rows(markdown_text)
+    top5_count: Optional[int] = None
+    if top5_rows is None:
+        errors.append("Could not find the Top 5 trademark references table.")
+    else:
+        expected_header = [
+            "Verbal Element",
+            "Status",
+            "Registration Office",
+            "Class(es)",
+            "Number",
+            "Date",
+            "Owner",
+            "Full Text URL",
+        ]
+        header = top5_rows[0] if top5_rows else []
+        if header != expected_header:
+            errors.append("The Top 5 trademark references table header was changed. Keep the exact template columns.")
+        top5_count = max(0, len(top5_rows) - 1)
+        if top5_count != 5:
+            errors.append(f"The Top 5 trademark references table must contain exactly 5 data rows; found {top5_count}.")
+
+    unresolved = [placeholder for placeholder in COMMON_TEMPLATE_PLACEHOLDERS if placeholder in markdown_text]
+    if unresolved:
+        errors.append(
+            "The markdown still contains template placeholders. Replace them before generating the PDF: "
+            + ", ".join(unresolved[:12])
+            + (" ..." if len(unresolved) > 12 else "")
+        )
+
+    if "FULL_TEXT_URL" in markdown_text:
+        errors.append("The markdown still contains FULL_TEXT_URL placeholders. Replace each with a real CompuMark full-text URL or a clear no-finding row.")
+
+    if not any(label in markdown_text for label in ["🟢 Low", "🟠 Medium", "🔴 High"]):
+        errors.append("The report must include one of the exact risk labels: 🟢 Low, 🟠 Medium, or 🔴 High.")
 
     return {
-        "description": "Trademark knockout report prompt with embedded workflow and report-template resources.",
-        "messages": [
-            {"role": "user", "content": {"type": "text", "text": starter_text}},
-            {"role": "user", "content": {"type": "resource", "resource": resource_content(WORKFLOW_INSTRUCTIONS_URI)}},
-            {"role": "user", "content": {"type": "resource", "resource": resource_content(REPORT_TEMPLATE_URI)}},
-        ],
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "top5_trademark_reference_rows": top5_count,
     }
-
-
-def get_prompt(params: Dict[str, Any]) -> Dict[str, Any]:
-    name = str(params.get("name") or "").strip()
-    if not name:
-        raise ValueError("Prompt name is required.")
-    if name != WORKFLOW_NAME:
-        raise ValueError(f"Unknown prompt: {name}")
-    arguments = params.get("arguments") or {}
-    if not isinstance(arguments, dict):
-        raise ValueError("Prompt arguments must be an object.")
-    return build_workflow_prompt(arguments)
-
-
-def read_resource(params: Dict[str, Any]) -> Dict[str, Any]:
-    uri = str(params.get("uri") or "").strip()
-    if not uri:
-        raise ValueError("Resource uri is required.")
-    if uri not in RESOURCES:
-        raise ValueError(f"Unknown resource: {uri}")
-    return {"contents": [resource_content(uri)]}
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +532,7 @@ def domain_for(url: str) -> str:
 
 
 def inline_markup(text: str) -> str:
-    """Convert tiny markdown subset to ReportLab paragraph markup."""
+    """Convert a tiny markdown subset to ReportLab paragraph markup."""
     parts: List[str] = []
     last = 0
     for match in LINK_RE.finditer(text):
@@ -871,7 +821,7 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     subject = clean_text(arguments.get("subject") or arguments.get("mark"))
     if not subject:
-        raise ValueError("subject is required.")
+        raise ValueError("subject is required. It must be the searched mark.")
 
     markdown_text = arguments.get("markdown") or arguments.get("markdown_text")
     markdown_path_arg = arguments.get("markdown_path")
@@ -881,13 +831,21 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
             raise FileNotFoundError(f"Markdown report not found: {markdown_path}")
         markdown_text = markdown_path.read_text(encoding="utf-8")
     if not markdown_text or not str(markdown_text).strip():
-        raise ValueError("markdown or markdown_path is required.")
+        raise ValueError("markdown or markdown_path is required. The completed report markdown must be provided.")
 
-    template_path = Path(arguments.get("template_path") or DEFAULT_TEMPLATE_PATH).expanduser()
-    if not template_path.is_absolute():
-        template_path = BASE_DIR / template_path
+    template_validation = validate_report_markdown(str(markdown_text))
+    if not template_validation["valid"]:
+        raise ValueError(
+            "Report markdown does not follow the required template. Fix these issues before generating the PDF: "
+            + "; ".join(template_validation["errors"])
+        )
+
+    if arguments.get("template_path"):
+        raise ValueError("template_path is not accepted in this POC. The tool must use assets/Clarivate_template.pdf.")
+
+    template_path = DEFAULT_TEMPLATE_PATH
     if not template_path.exists():
-        raise FileNotFoundError(f"Template PDF not found: {template_path}")
+        raise FileNotFoundError(f"Clarivate template PDF not found: {template_path}")
 
     output_path = resolve_path(
         arguments.get("output_path"),
@@ -928,7 +886,10 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "markdown_path": str(markdown_output_path.resolve()) if markdown_output_path else None,
         "markdown_url": markdown_url,
         "template_path": str(template_path.resolve()),
-        "final_response_instruction": "Give the user pdf_url/download_the_report when present. If it is null, give pdf_path and mention that no public URL is configured.",
+        "template_validation": template_validation,
+        "final_response_instruction": (
+            "Give the user pdf_url/download_the_report when present. If it is null, give pdf_path and mention that no public URL is configured."
+        ),
     }
 
 
@@ -937,12 +898,13 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-NULLABLE_STRING = {"type": ["string", "null"]}
+STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
 OBJECT = {"type": "object", "additionalProperties": True}
-STRING_OR_ARRAY = {"type": ["string", "array", "null"], "items": {"type": "string"}}
+NULLABLE_STRING = {"type": ["string", "null"]}
 
 PREPARE_OUTPUT_SCHEMA = {
     "type": "object",
+    "description": "Mandatory kickoff response containing the full workflow guardrails and exact markdown template.",
     "required": [
         "workflow_name",
         "status",
@@ -950,10 +912,15 @@ PREPARE_OUTPUT_SCHEMA = {
         "missing_required_field",
         "clarifying_question",
         "next_action",
-        "resource_uris",
-        "instructions",
+        "must_follow_rules",
+        "workflow_steps",
+        "compumark_trademark_search_rules",
+        "compumark_litigation_search_rules",
+        "report_drafting_rules",
+        "final_response_rules",
         "report_template",
         "final_pdf_tool",
+        "final_response_instruction",
     ],
     "properties": {
         "workflow_name": {"type": "string"},
@@ -962,18 +929,22 @@ PREPARE_OUTPUT_SCHEMA = {
         "missing_required_field": NULLABLE_STRING,
         "clarifying_question": NULLABLE_STRING,
         "next_action": {"type": "string"},
-        "resource_uris": OBJECT,
-        "instructions": {"type": "string"},
+        "must_follow_rules": STRING_ARRAY,
+        "workflow_steps": STRING_ARRAY,
+        "compumark_trademark_search_rules": STRING_ARRAY,
+        "compumark_litigation_search_rules": STRING_ARRAY,
+        "report_drafting_rules": STRING_ARRAY,
+        "final_response_rules": STRING_ARRAY,
         "report_template": {"type": "string"},
         "final_pdf_tool": {"type": "string"},
-        "note": {"type": "string"},
+        "final_response_instruction": {"type": "string"},
     },
     "additionalProperties": False,
 }
 
 PDF_OUTPUT_SCHEMA = {
     "type": "object",
-    "required": ["pdf_path", "pdf_exists", "pdf_size_bytes"],
+    "required": ["pdf_path", "pdf_exists", "pdf_size_bytes", "template_validation"],
     "properties": {
         "pdf_path": {"type": "string"},
         "pdf_url": NULLABLE_STRING,
@@ -983,6 +954,7 @@ PDF_OUTPUT_SCHEMA = {
         "markdown_path": NULLABLE_STRING,
         "markdown_url": NULLABLE_STRING,
         "template_path": {"type": "string"},
+        "template_validation": OBJECT,
         "final_response_instruction": {"type": "string"},
     },
     "additionalProperties": False,
@@ -990,34 +962,40 @@ PDF_OUTPUT_SCHEMA = {
 
 TOOLS: Dict[str, Dict[str, Any]] = {
     "prepare_trademark_knockout_report": {
-        "title": "Prepare trademark knockout report",
         "description": (
-            "Use this first when the user asks to run, start, prepare, create, or generate a trademark knockout report, "
-            "brand clearance report, trademark clearance search, or brand availability report. It returns the complete "
-            "workflow instructions and markdown report template in one response; it does not run database searches."
+            "MANDATORY FIRST TOOL for any user request to run, start, prepare, create, or generate a trademark knockout report, "
+            "brand clearance report, trademark clearance search, or brand availability report. Call this before CompuMark searches. "
+            "It returns strict workflow instructions, missing-criteria handling, the exact markdown template, and the requirement to finish by calling "
+            "generate_clarivate_report_pdf. If it returns needs_clarification, ask only the clarifying question and stop. If it returns ready, "
+            "follow all steps and do not give a final user answer until the PDF has been generated."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "mark": {"type": "string", "description": "Exact word mark to search."},
-                "jurisdictions": {
-                    **STRING_OR_ARRAY,
-                    "description": "Territories or registration offices, for example EU, UK, US, WO, or EM.",
-                },
-                "nice_classes": {
-                    **STRING_OR_ARRAY,
-                    "description": "Nice class numbers, for example 9, 42 or ['9', '42'].",
-                },
-                "language": {"type": "string", "description": "Visible report language. Defaults to the user's language."},
-                "type": {"type": "string", "description": "Optional: Word, Logo, or Both."},
-                "match_scope": {"type": "string", "description": "Optional: Exact only, Contains, Phonetic, Plurals, etc."},
-                "notes": {"type": "string", "description": "Optional limitations, assumptions, or exclusions."},
-                "criteria": {
+                "search_criteria": {
                     "type": "object",
-                    "description": "Optional object containing known criteria such as mark, jurisdictions, and nice_classes.",
+                    "description": "Known values such as mark, jurisdictions/offices, nice_classes, language, type, match_scope, and notes.",
                     "additionalProperties": True,
                 },
-                "criteria_json": {"type": "string", "description": "Optional JSON object with known criteria."},
+                "criteria": {
+                    "type": "object",
+                    "description": "Alias for search_criteria.",
+                    "additionalProperties": True,
+                },
+                "criteria_json": {"type": "string", "description": "Optional JSON object string with known criteria."},
+                "mark": {"type": "string", "description": "Exact word mark to search."},
+                "jurisdictions": {"type": "string", "description": "Territories or offices, for example EU, UK, US, WO."},
+                "territories": {"type": "string", "description": "Alias for jurisdictions."},
+                "offices": {"type": "string", "description": "Alias for jurisdictions or registration offices."},
+                "registration_offices": {"type": "string", "description": "Alias for jurisdictions or offices."},
+                "nice_classes": {"type": "string", "description": "Nice class numbers, comma-separated if multiple."},
+                "classes": {"type": "string", "description": "Alias for nice_classes."},
+                "nice_class_numbers": {"type": "string", "description": "Alias for nice_classes."},
+                "int_class_numbers": {"type": "string", "description": "Alias for nice_classes."},
+                "language": {"type": "string", "description": "Visible report language. Defaults to the user's language."},
+                "type": {"type": "string", "description": "Word, logo, or both, if known."},
+                "match_scope": {"type": "string", "description": "Exact, contains, phonetic, plurals, etc., if known."},
+                "notes": {"type": "string", "description": "Any limitations, exclusions, or assumptions."},
             },
             "additionalProperties": False,
         },
@@ -1025,18 +1003,22 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "handler": prepare_trademark_knockout_report,
     },
     "generate_clarivate_report_pdf": {
-        "title": "Generate Clarivate report PDF",
-        "description": "Generate the final PDF using the Clarivate template: template cover, generated report body, template closing page.",
+        "description": (
+            "MANDATORY FINAL TOOL for the trademark knockout workflow. Call this only after the report markdown has been completed using the exact "
+            "template returned by prepare_trademark_knockout_report. This tool validates required headings, rejects unresolved template placeholders, "
+            "checks the exact five-row Top 5 table, and generates the Clarivate-template PDF using assets/Clarivate_template.pdf. The agent must "
+            "finish the user-facing reply with download_the_report or pdf_url when present, or with pdf_path if no public URL is configured. "
+            "Do not provide the final report as plain markdown instead of using this tool, and do not try to change the PDF template."
+        ),
         "inputSchema": {
             "type": "object",
             "required": ["subject"],
             "anyOf": [{"required": ["markdown"]}, {"required": ["markdown_path"]}],
             "properties": {
-                "subject": {"type": "string", "description": "Cover subtitle, normally the searched mark."},
-                "markdown": {"type": "string", "description": "Completed report markdown."},
+                "subject": {"type": "string", "description": "Cover subtitle and searched mark. Required."},
+                "markdown": {"type": "string", "description": "Completed report markdown using the exact required template."},
                 "markdown_path": {"type": "string", "description": "Markdown file path if markdown is omitted."},
                 "output_path": {"type": "string", "description": "Optional PDF output path. Defaults to TRADEMARK_REPORT_OUTPUT_DIR or current directory."},
-                "template_path": {"type": "string", "description": "Optional Clarivate template path."},
                 "save_markdown": {"type": "boolean", "default": True},
                 "markdown_output_path": {"type": "string", "description": "Optional markdown copy output path."},
             },
@@ -1054,41 +1036,39 @@ TOOLS: Dict[str, Dict[str, Any]] = {
 
 
 def handle_initialize(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    protocol = params.get("protocolVersion") or "2025-06-18"
+    protocol = params.get("protocolVersion") or "2024-11-05"
     return json_rpc_result(
         message_id,
         {
             "protocolVersion": protocol,
-            "capabilities": {
-                "tools": {"listChanged": False},
-                "prompts": {"listChanged": False},
-                "resources": {"listChanged": False},
-            },
+            "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
-                "For ChatGPT-style clients, call the tool 'prepare_trademark_knockout_report' first "
-                "when the user asks for a trademark knockout or clearance report. "
-                "For MCP clients with prompt pickers, the prompt 'trademark_knockout_report' "
-                "embeds the same workflow and report-template resources. "
-                "Only call the tool 'generate_clarivate_report_pdf' after drafting the completed markdown report."
+                "Tools-only POC. For any trademark knockout, clearance, brand availability, or similar report request, "
+                "call prepare_trademark_knockout_report first. Follow all returned rules and workflow steps. If clarification "
+                "is needed, ask only the returned clarifying_question and stop. If ready, use the separate CompuMark tools, "
+                "fill the exact template, then call generate_clarivate_report_pdf. The final user-facing answer must include "
+                "the generated PDF URL/path. Do not use prompts/resources and do not finish with only markdown."
             ),
         },
     )
 
 
 def handle_tools_list(message_id: Any) -> Dict[str, Any]:
-    tools = []
-    for name, spec in TOOLS.items():
-        descriptor = {
-            "name": name,
-            "description": spec["description"],
-            "inputSchema": spec["inputSchema"],
-            "outputSchema": spec["outputSchema"],
-        }
-        if spec.get("title"):
-            descriptor["title"] = spec["title"]
-        tools.append(descriptor)
-    return json_rpc_result(message_id, {"tools": tools})
+    return json_rpc_result(
+        message_id,
+        {
+            "tools": [
+                {
+                    "name": name,
+                    "description": spec["description"],
+                    "inputSchema": spec["inputSchema"],
+                    "outputSchema": spec["outputSchema"],
+                }
+                for name, spec in TOOLS.items()
+            ]
+        },
+    )
 
 
 def handle_tools_call(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1107,28 +1087,6 @@ def handle_tools_call(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]
         return json_rpc_result(message_id, text_result({"tool": name, "error": str(exc)}, is_error=True))
 
 
-def handle_prompts_list(message_id: Any) -> Dict[str, Any]:
-    return json_rpc_result(message_id, {"prompts": [prompt_metadata(prompt) for prompt in PROMPTS.values()]})
-
-
-def handle_prompts_get(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        return json_rpc_result(message_id, get_prompt(params))
-    except Exception as exc:
-        return json_rpc_error(message_id, -32602, str(exc))
-
-
-def handle_resources_list(message_id: Any) -> Dict[str, Any]:
-    return json_rpc_result(message_id, {"resources": [resource_metadata(resource) for resource in RESOURCES.values()]})
-
-
-def handle_resources_read(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        return json_rpc_result(message_id, read_resource(params))
-    except Exception as exc:
-        return json_rpc_error(message_id, -32602, str(exc))
-
-
 def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     method = message.get("method")
     message_id = message.get("id")
@@ -1144,16 +1102,20 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return handle_tools_list(message_id)
     if method == "tools/call":
         return handle_tools_call(message_id, params)
+
+    # No prompts or resources are exposed in this tools-only POC.
+    # Return empty lists for compatibility with clients that probe these methods.
     if method == "prompts/list":
-        return handle_prompts_list(message_id)
-    if method == "prompts/get":
-        return handle_prompts_get(message_id, params)
+        return json_rpc_result(message_id, {"prompts": []})
     if method == "resources/list":
-        return handle_resources_list(message_id)
-    if method == "resources/read":
-        return handle_resources_read(message_id, params)
+        return json_rpc_result(message_id, {"resources": []})
     if method == "resources/templates/list":
         return json_rpc_result(message_id, {"resourceTemplates": []})
+    if method == "prompts/get":
+        return json_rpc_error(message_id, -32602, "This tools-only POC does not expose MCP prompts. Use prepare_trademark_knockout_report.")
+    if method == "resources/read":
+        return json_rpc_error(message_id, -32602, "This tools-only POC does not expose MCP resources. Use prepare_trademark_knockout_report.")
+
     return json_rpc_error(message_id, -32601, f"Method not found: {method}")
 
 
@@ -1173,42 +1135,24 @@ def run_stdio() -> int:
 
 
 def self_test() -> int:
-    prepared = prepare_trademark_knockout_report(
-        {
-            "mark": "NOVALYTIC",
-            "jurisdictions": "EU, UK",
-            "nice_classes": "9, 42",
-            "language": "English",
-        }
+    ready = prepare_trademark_knockout_report(
+        {"mark": "NOVALYTIC", "jurisdictions": "EU, UK", "nice_classes": "9, 42", "language": "English"}
     )
-    prompt = get_prompt(
-        {
-            "name": WORKFLOW_NAME,
-            "arguments": {
-                "mark": "NOVALYTIC",
-                "jurisdictions": "EU, UK",
-                "nice_classes": "9, 42",
-                "language": "English",
-            },
-        }
-    )
+    missing = prepare_trademark_knockout_report({"mark": "NOVALYTIC", "jurisdictions": "EU, UK"})
+    template_validation = validate_report_markdown(REPORT_TEMPLATE)
+
     print(
         json.dumps(
             {
+                "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "tools": list(TOOLS.keys()),
-                "prepare_status": prepared["status"],
-                "prepare_missing_required_field": prepared["missing_required_field"],
-                "prepare_resource_uris": prepared["resource_uris"],
-                "prompts": [prompt_metadata(item) for item in PROMPTS.values()],
-                "resources": [resource_metadata(item) for item in RESOURCES.values()],
-                "prompt_message_summary": [
-                    {
-                        "role": message["role"],
-                        "content_type": message["content"]["type"],
-                        "uri": message["content"].get("resource", {}).get("uri"),
-                    }
-                    for message in prompt["messages"]
-                ],
+                "ready_status": ready["status"],
+                "ready_next_action": ready["next_action"],
+                "missing_status": missing["status"],
+                "missing_required_field": missing["missing_required_field"],
+                "missing_clarifying_question": missing["clarifying_question"],
+                "template_validation_on_blank_template_should_be_invalid": template_validation,
+                "note": "PDF generation is not run in self-test because it requires assets/Clarivate_template.pdf.",
             },
             ensure_ascii=False,
             indent=2,
@@ -1219,7 +1163,7 @@ def self_test() -> int:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the trademark knockout report MCP server.")
-    parser.add_argument("--self-test", action="store_true", help="Print sample prompt/resource/tool output and exit.")
+    parser.add_argument("--self-test", action="store_true", help="Print sample tool output and exit.")
     return parser.parse_args(argv)
 
 
