@@ -62,7 +62,6 @@ PIPE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s
 
 STEP_ORDER = [
     "criteria",
-    "online_presence",
     "trademark_search",
     "litigation_search",
     "draft_report",
@@ -73,14 +72,12 @@ STEP_TITLES = {
     "criteria": "Confirm the search criteria",
     "trademark_search": "Collect CompuMark trademark evidence",
     "litigation_search": "Check relevant litigation",
-    "online_presence": "Check online presence",
     "draft_report": "Draft the report markdown",
     "generate_pdf": "Generate the Clarivate-template PDF",
 }
 
 STEP_SUMMARY = [
-    {"name": "criteria", "purpose": "Confirm mark, territories/offices, Nice classes, and whether web search is allowed."},
-    {"name": "online_presence", "purpose": "Look for material web, company, product, domain, and social-use signals."},
+    {"name": "criteria", "purpose": "Confirm mark, territories/offices, and Nice classes."},
     {"name": "trademark_search", "purpose": "Use CompuMark trademark tools and keep the five most relevant records."},
     {"name": "litigation_search", "purpose": "Check whether the mark, top references, or owners appear in material trademark disputes."},
     {"name": "draft_report", "purpose": "Fill the report template with source-backed evidence."},
@@ -145,41 +142,12 @@ Date of report: [DATE]
 
 ---
 
-## 3. Online Presence Search
-
-### 3.1 Summary
-
-| Item                         | Result                                                |
-| ---------------------------- | ----------------------------------------------------- |
-| Exact same name found online | [Yes / No / Limited / Not performed (user opted out)] |
-| Similar names found online   | [Yes / No / Not performed (user opted out)]           |
-| Commercial use observed      | [Yes / No / Limited / Not performed (user opted out)] |
-
-### 3.2 Most Relevant Web Findings (Top 5)
-
-| Name / Sign | Webpage URL / Source      | Territory          | Type of use                                         | Notes            |
-| ----------- | ------------------------- | ------------------ | --------------------------------------------------- | ---------------- |
-| [NAME 1]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
-| [NAME 2]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
-| [NAME 3]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
-| [NAME 4]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
-| [NAME 5]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
-
-### 3.3 Web Search Comments
-
-- [State whether the searched name appears to be in active commercial use online.]
-- [State whether similar names create practical marketplace overlap.]
-- [State whether any domain or branding conflicts are notable.]
-- [If web search was not run, state: "Online presence search not performed (user opted out)."]
-
----
-
-## 4. Key Takeaways
+## 3. Key Takeaways
 
 Overall clearance view: [🟢 Low / 🟠 Medium / 🔴 High concern]
 
 - [Key takeaway 1: concise conclusion on trademark database results.]
-- [Key takeaway 2: concise conclusion on online use / marketplace presence.]
+- [Key takeaway 2: concise conclusion on relevant litigation, if any.]
 - [Key takeaway 3: note on main legal or commercial risk.]
 - [Key takeaway 4: optional recommendation, e.g. proceed / proceed with caution / consider narrowing / consider alternate mark.]
 
@@ -261,11 +229,11 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if step == "criteria":
         instructions = append_next_instruction(
             "Confirm only the essentials: exact mark, territories or registration offices, and Nice classes. "
-            "If one is missing, ask only for the first missing item. Assume web search is allowed unless the user opted out. "
+            "If one is missing, ask only for the first missing item. "
             "Do not run CompuMark searches in this step.",
             next_step,
         )
-        expected_output = "A small criteria object: mark, jurisdictions/offices, nice_classes, and optional web_search_enabled."
+        expected_output = "A small criteria object: mark, jurisdictions/offices, and nice_classes."
 
     elif step == "trademark_search":
         instructions = append_next_instruction(
@@ -298,22 +266,11 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
         )
         expected_output = "Material litigation findings or a clear no-material-litigation note."
 
-    elif step == "online_presence":
-        instructions = append_next_instruction(
-            "Use the built-in public web search tool (`web.run`) to perform a global online presence search, unless the user explicitly opted out. "
-            "Determine whether the searched name has meaningful real-world use in domains, software/apps, products, marketplaces, or branding. "
-            "Do not limit the search to trademark territories. "
-            "Keep only the five most relevant exact-name or highly similar findings, prioritizing companies, products, domains, social profiles, app/software listings, and marketplace conflicts. "
-            "Cite each finding with a clear domain label.",
-            next_step,
-        )        
-        expected_output = "Top web findings and a brief view on whether online use increases practical risk."
-
     elif step == "draft_report":
         instructions = append_next_instruction(
-            "Call get_trademark_knockout_report_template, then fill the same structure with the evidence collected. Keep the two Top 5 tables at exactly "
-            "five data rows each; use a simple 'No further material source-backed finding' row only when needed. Use 🟢 Low, 🟠 Medium, or 🔴 High risk labels. "
-            "Use CompuMark links as [full-text](url) and ordinary web links with domain labels.",
+            "Call get_trademark_knockout_report_template, then fill the same structure with the evidence collected. Keep the Top 5 trademark references table at exactly "
+            "five data rows; use a simple 'No further material source-backed finding' row only when needed. Use 🟢 Low, 🟠 Medium, or 🔴 High risk labels. "
+            "Use CompuMark links as [full-text](url).",
             next_step,
         )
         expected_output = "Completed markdown report ready for PDF generation."
@@ -347,8 +304,8 @@ def get_report_template(_: Dict[str, Any]) -> Dict[str, Any]:
         "rules": [
             "Keep the section structure and numbering.",
             "Use source-backed facts only; make uncertainty visible.",
-            "Keep each Top 5 table at exactly five data rows.",
-            "Use 'full-text' as the label for CompuMark full-text links and domain labels for web links.",
+            "Keep the Top 5 trademark references table at exactly five data rows.",
+            "Use 'full-text' as the label for CompuMark full-text links.",
             "Write the visible report in the user's language unless they asked otherwise.",
         ],
     }
@@ -811,7 +768,7 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "search_criteria": {
                     "type": "object",
-                    "description": "Known values such as mark, jurisdictions/offices, nice_classes, and web_search_enabled.",
+                    "description": "Known values such as mark, jurisdictions/offices, and nice_classes.",
                     "additionalProperties": True,
                 },
                 "language": {"type": "string", "description": "Optional visible report language."},
