@@ -300,11 +300,13 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     elif step == "online_presence":
         instructions = append_next_instruction(
-            "Use your intenal web search tool to run an online presence search unless the user opted out. "
-            "Determine whether the proposed name has meaningful real-world use in domains, software/apps, products, marketplaces, or branding. This search is global and must not be limited to the selected trademark territories."
-            "Keep the five most useful findings: companies, products, domains, social profiles, or obvious marketplace conflicts. Use domain labels for web links.",
+            "Use the built-in public web search tool (`web.run`) to perform a global online presence search, unless the user explicitly opted out. "
+            "Determine whether the searched name has meaningful real-world use in domains, software/apps, products, marketplaces, or branding. "
+            "Do not limit the search to trademark territories. "
+            "Keep only the five most relevant exact-name or highly similar findings, prioritizing companies, products, domains, social profiles, app/software listings, and marketplace conflicts. "
+            "Cite each finding with a clear domain label.",
             next_step,
-        )
+        )        
         expected_output = "Top web findings and a brief view on whether online use increases practical risk."
 
     elif step == "draft_report":
