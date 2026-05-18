@@ -274,7 +274,8 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "Only proceed to next search if you have less than five results. Start with the exact search "
             "in the requested offices and classes. "
             "Select five records by exactness, territory, class overlap, active status, and owner relevance. For those IDs, fetch trademark-content "
-            "and create full-text links. Do not fetch goods."
+            "and create full-text links. Do not fetch goods. "
+            "only do trademark searches using the verbal element given by the user, no variations. "
             "* Avoid calling country code lookup tools if possible. Use your internal knowledge of country codes when possible."
             "* If a specific country is specified, also include 'WO' with 'limitWOresultsToDesignated': true in search parameters."
             "* If an EU country is specified, also include 'EM' and 'WO' with 'limitWOresultsToDesignated': true in search parameters.",
@@ -290,6 +291,7 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "* always use this condition on first action type: {'field': 'FIRST_ACTION_TYPE', 'op': 'EQ', 'value': 'OPPOSITION'}. "
             "* When using a filter on party name, also include this filter: {'field': 'PARTY_IS_EX_OFFICIO', 'op': 'EQ', 'value': False}. "
             "* avoid queries with OR conditions. Instead, split them into multiple separate queries that use only AND conditions. "
+            "* when using group_by, only order_by fields that are also grouped or aggregated. "
             "* the format of the order_by clause is a dict. A valid example: order_by: { 'FIRST_ACTION_DATE':  'DESC' }.",
             next_step,
         )
