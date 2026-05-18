@@ -62,9 +62,9 @@ PIPE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s
 
 STEP_ORDER = [
     "criteria",
+    "online_presence",
     "trademark_search",
     "litigation_search",
-    "online_presence",
     "draft_report",
     "generate_pdf",
 ]
@@ -80,9 +80,9 @@ STEP_TITLES = {
 
 STEP_SUMMARY = [
     {"name": "criteria", "purpose": "Confirm mark, territories/offices, Nice classes, and whether web search is allowed."},
+    {"name": "online_presence", "purpose": "Look for material web, company, product, domain, and social-use signals."},
     {"name": "trademark_search", "purpose": "Use CompuMark trademark tools and keep the five most relevant records."},
     {"name": "litigation_search", "purpose": "Check whether the mark, top references, or owners appear in material trademark disputes."},
-    {"name": "online_presence", "purpose": "Look for material web, company, product, domain, and social-use signals."},
     {"name": "draft_report", "purpose": "Fill the report template with source-backed evidence."},
     {"name": "generate_pdf", "purpose": "Render the report with the Clarivate PDF template and return the link/path."},
 ]
