@@ -277,6 +277,7 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "and create full-text links. Do not fetch goods. "
             "only do trademark searches using the verbal element given by the user, no variations. "
             "* Avoid calling country code lookup tools if possible. Use your internal knowledge of country codes when possible."
+            "* For INT_CLASS_NUMBER, use operator: 'EQUALS' with a comma-separated value such as '3,4,5' to search multiple Nice classes in one request. "
             "* If a specific country is specified, also include 'WO' with 'limitWOresultsToDesignated': true in search parameters."
             "* If an EU country is specified, also include 'EM' and 'WO' with 'limitWOresultsToDesignated': true in search parameters.",
             next_step,
