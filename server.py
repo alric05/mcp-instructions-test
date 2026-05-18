@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Small MCP server for a trademark knockout report POC.
 
-The server does two things only:
-1. Gives concise staged instructions for an agent that will use the CompuMark MCP tools.
-2. Generates the final PDF by merging a markdown report into the Clarivate PDF template.
+This version uses MCP prompts and resources to put the workflow instructions in
+context instead of asking the agent to call step-by-step instruction tools.
 
-It intentionally does not try to re-describe the CompuMark API or over-control the agent.
+The server exposes:
+1. One prompt: trademark_knockout_report
+   - Starts the workflow and embeds the workflow + report-template resources.
+2. Two resources:
+   - workflow instructions
+   - markdown report template
+3. One tool:
+   - generate_clarivate_report_pdf, the final action that renders the report.
+
+This is intentionally simple POC code, not a production-grade MCP framework.
 """
 
 from __future__ import annotations
@@ -38,7 +46,7 @@ except ImportError:  # pragma: no cover - runtime dependency guard
 
 
 SERVER_NAME = "trademark-knockout-report-workflow"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0-prompts-resources-poc"
 WORKFLOW_NAME = "trademark_knockout_report"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -60,29 +68,8 @@ SUBTITLE_FONT_SIZE = 22
 LINK_RE = re.compile(r"\[([^\]]+)]\((https?://[^)\s]+)\)")
 PIPE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
-STEP_ORDER = [
-    "criteria",
-    "trademark_search",
-    "litigation_search",
-    "draft_report",
-    "generate_pdf",
-]
-
-STEP_TITLES = {
-    "criteria": "Confirm the search criteria",
-    "trademark_search": "Collect CompuMark trademark evidence",
-    "litigation_search": "Check relevant litigation",
-    "draft_report": "Draft the report markdown",
-    "generate_pdf": "Generate the Clarivate-template PDF",
-}
-
-STEP_SUMMARY = [
-    {"name": "criteria", "purpose": "Confirm mark, territories/offices, and Nice classes."},
-    {"name": "trademark_search", "purpose": "Use CompuMark trademark tools and keep the five most relevant records."},
-    {"name": "litigation_search", "purpose": "Check whether the mark, top references, or owners appear in material trademark disputes."},
-    {"name": "draft_report", "purpose": "Fill the report template with source-backed evidence."},
-    {"name": "generate_pdf", "purpose": "Render the report with the Clarivate PDF template and return the link/path."},
-]
+WORKFLOW_INSTRUCTIONS_URI = "trademark-knockout://workflow/instructions.md"
+REPORT_TEMPLATE_URI = "trademark-knockout://workflow/report-template.md"
 
 REPORT_TEMPLATE = """# AI Generated Trademark Knockout Search Report (Demo only)
 
@@ -158,6 +145,119 @@ Disclaimer
 This report is produced for informational purposes only and does not constitute legal advice. Trademark clearance searches are not exhaustive and do not guarantee the availability or registrability of a mark. Always consult a qualified trademark attorney before filing.
 """
 
+WORKFLOW_INSTRUCTIONS = """# Trademark Knockout Report Workflow
+
+Use this resource as the operating instructions for the trademark knockout report POC.
+The old step-by-step instruction tools are intentionally not exposed in this version.
+The workflow should be followed from context after this resource is attached or read.
+
+## Goal
+
+Create an AI Generated Trademark Knockout Search Report and render it as a Clarivate-template PDF.
+Use CompuMark trademark and litigation evidence. Keep the report concise, source-backed, and visibly uncertain where the evidence is incomplete.
+
+## Workflow order
+
+1. Confirm search criteria.
+2. Collect CompuMark trademark evidence.
+3. Check relevant litigation.
+4. Draft the report markdown using the report-template resource.
+5. Call `generate_clarivate_report_pdf` and return the generated link or local path.
+
+## 1. Confirm search criteria
+
+Confirm only the essentials:
+
+- Exact mark.
+- Territories or registration offices.
+- Nice classes.
+
+If one essential item is missing, ask only for the first missing item. Do not run CompuMark searches before the essentials are known.
+Optional details such as word/logo/both, match scope, and notes can be captured when available, but should not block the workflow unless they materially affect the search.
+
+## 2. Collect CompuMark trademark evidence
+
+Use the CompuMark trademark-search tool to find the most relevant records. Do not use the knockout-search tool.
+Perform at most three trademark searches:
+
+1. Exact search without phonetics.
+2. Exact search with phonetics.
+3. Contains search with phonetics.
+
+Only proceed to the next search if you have fewer than five useful results. Start with the exact search in the requested offices and classes.
+Only search using the verbal element provided by the user; do not invent spelling variants or alternate marks.
+
+Select five records by:
+
+- Exactness or similarity of the verbal element.
+- Territory or registration office relevance.
+- Nice class overlap.
+- Active/live status.
+- Owner relevance and apparent commercial significance.
+
+For the selected IDs, fetch trademark-content and create full-text links labeled exactly `full-text`.
+Do not fetch goods for this POC.
+
+CompuMark search notes:
+
+- Avoid country-code lookup tools if possible. Use common country/office codes from internal knowledge when possible.
+- For `INT_CLASS_NUMBER`, use operator `EQUALS` with a comma-separated value such as `3,4,5` to search multiple Nice classes in one request.
+- If a specific country is specified, also include `WO` with `limitWOresultsToDesignated: true` in search parameters.
+- If an EU country is specified, also include `EM` and `WO` with `limitWOresultsToDesignated: true` in search parameters.
+
+## 3. Check relevant litigation
+
+Use the CompuMark litigation-search tool lightly for trademark disputes involving:
+
+- The searched mark.
+- The strongest matching verbal elements.
+- Owners from the top trademark references.
+
+Keep only cases that could affect risk. Summarize parties, jurisdiction, status, case type, and why each case matters. If there is no material litigation, say so plainly.
+
+Litigation search constraints:
+
+- Always use this condition on first action type in the first query: `{'field': 'FIRST_ACTION_TYPE', 'op': 'EQ', 'value': 'OPPOSITION'}`.
+- When filtering on party name, also include: `{'field': 'PARTY_IS_EX_OFFICIO', 'op': 'EQ', 'value': False}`.
+- Avoid queries with OR conditions. Split them into separate queries that use only AND conditions.
+- When using `group_by`, only `order_by` fields that are also grouped or aggregated.
+- The `order_by` clause is a dict. Valid example: `order_by: {'FIRST_ACTION_DATE': 'DESC'}`.
+
+## 4. Draft the report markdown
+
+Use the `trademark-knockout://workflow/report-template.md` resource.
+Keep the section structure and numbering.
+Use source-backed facts only and make uncertainty visible.
+Keep the Top 5 trademark references table at exactly five data rows.
+If fewer than five material references exist, fill remaining rows with a simple row such as `No further material source-backed finding`.
+Use CompuMark links as `[full-text](url)`.
+Use risk labels exactly as one of: `🟢 Low`, `🟠 Medium`, `🔴 High`.
+Write the visible report in the user's language unless they asked otherwise.
+
+## 5. Generate the PDF
+
+Call `generate_clarivate_report_pdf` with:
+
+- `subject`: the searched mark.
+- `markdown`: the completed report markdown.
+
+Then answer the user with `download_the_report` or `pdf_url` if present. If no public URL is configured, return the local `pdf_path` and mention that no public URL is configured.
+"""
+
+REPORT_TEMPLATE_RESOURCE = """# Trademark Knockout Report Template
+
+Rules:
+
+- Keep the section structure and numbering.
+- Use source-backed facts only; make uncertainty visible.
+- Keep the Top 5 trademark references table at exactly five data rows.
+- Use `full-text` as the label for CompuMark full-text links.
+- Write the visible report in the user's language unless they asked otherwise.
+
+---
+
+""" + REPORT_TEMPLATE
+
 
 # ---------------------------------------------------------------------------
 # MCP helpers
@@ -165,6 +265,10 @@ This report is produced for informational purposes only and does not constitute 
 
 
 def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
+    """Return a normal MCP tool result.
+
+    Prompts and resources do not use this wrapper; only tools/call does.
+    """
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
     result: Dict[str, Any] = {"content": [{"type": "text", "text": text}], "isError": is_error}
     if not is_error and isinstance(payload, (dict, list)):
@@ -184,131 +288,157 @@ def json_rpc_error(message_id: Any, code: int, message: str, data: Any = None) -
 
 
 # ---------------------------------------------------------------------------
-# Workflow instruction tools
+# Prompt and resource helpers
 # ---------------------------------------------------------------------------
 
 
-def next_step_name(step_name: str) -> Optional[str]:
-    if step_name not in STEP_ORDER:
-        raise ValueError(f"Unknown step_name '{step_name}'. Expected one of: {', '.join(STEP_ORDER)}")
-    index = STEP_ORDER.index(step_name)
-    return STEP_ORDER[index + 1] if index + 1 < len(STEP_ORDER) else None
+RESOURCES: Dict[str, Dict[str, Any]] = {
+    WORKFLOW_INSTRUCTIONS_URI: {
+        "uri": WORKFLOW_INSTRUCTIONS_URI,
+        "name": "workflow-instructions.md",
+        "title": "Trademark knockout workflow instructions",
+        "description": "End-to-end instructions for the trademark knockout report workflow.",
+        "mimeType": "text/markdown",
+        "text": WORKFLOW_INSTRUCTIONS,
+        "annotations": {"audience": ["assistant"], "priority": 1.0},
+    },
+    REPORT_TEMPLATE_URI: {
+        "uri": REPORT_TEMPLATE_URI,
+        "name": "report-template.md",
+        "title": "Trademark knockout markdown report template",
+        "description": "Markdown template and rules for the final report body.",
+        "mimeType": "text/markdown",
+        "text": REPORT_TEMPLATE_RESOURCE,
+        "annotations": {"audience": ["assistant"], "priority": 0.9},
+    },
+}
 
-
-def next_call_text(next_step: Optional[str]) -> Optional[str]:
-    if next_step is None:
-        return None
-    return f"Call get_trademark_knockout_step_instructions with step_name='{next_step}'."
-
-
-def append_next_instruction(body: str, next_step: Optional[str]) -> str:
-    if next_step is None:
-        return body + "\n\nThis is the final step; do not call another instruction step."
-    return body + f"\n\nWhen you are done with this, call get_trademark_knockout_step_instructions with step_name='{next_step}'."
-
-
-def start_trademark_knockout_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    first_step = STEP_ORDER[0]
-    return {
-        "workflow_name": WORKFLOW_NAME,
-        "steps": STEP_SUMMARY,
-        "first_step_name": first_step,
-        "next_instruction_tool": "get_trademark_knockout_step_instructions",
-        "next_instruction_call": next_call_text(first_step),
-        "known_criteria": arguments.get("search_criteria") or arguments.get("criteria") or {},
-        "note": "Follow the steps in order. After each step, use next_step_name to fetch the next instructions.",
-    }
-
-
-def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    step = str(arguments.get("step_name") or "").strip()
-    if not step:
-        raise ValueError("step_name is required.")
-    next_step = next_step_name(step)
-
-    if step == "criteria":
-        instructions = append_next_instruction(
-            "Confirm only the essentials: exact mark, territories or registration offices, and Nice classes. "
-            "If one is missing, ask only for the first missing item. "
-            "Do not run CompuMark searches in this step.",
-            next_step,
-        )
-        expected_output = "A small criteria object: mark, jurisdictions/offices, and nice_classes."
-
-    elif step == "trademark_search":
-        instructions = append_next_instruction(
-            "Use the CompuMark trademark-search tool to find the most relevant records. Do not use the knockout-search tool. "
-            "Perform at most three trademark searches. An exact search without phonetics, an exact search with phonetics, and a contain search with phonetics. " 
-            "Only proceed to next search if you have less than five results. Start with the exact search "
-            "in the requested offices and classes. "
-            "Select five records by exactness, territory, class overlap, active status, and owner relevance. For those IDs, fetch trademark-content "
-            "and create full-text links. Do not fetch goods. "
-            "only do trademark searches using the verbal element given by the user, no variations. "
-            "* Avoid calling country code lookup tools if possible. Use your internal knowledge of country codes when possible."
-            "* For INT_CLASS_NUMBER, use operator: 'EQUALS' with a comma-separated value such as '3,4,5' to search multiple Nice classes in one request. "
-            "* If a specific country is specified, also include 'WO' with 'limitWOresultsToDesignated': true in search parameters."
-            "* If an EU country is specified, also include 'EM' and 'WO' with 'limitWOresultsToDesignated': true in search parameters.",
-            next_step,
-        )
-        expected_output = "Top trademark references, content for selected IDs, and full-text links labeled 'full-text'."
-
-    elif step == "litigation_search":
-        instructions = append_next_instruction(
-            "Use the CompuMark litigation-search tool lightly for trademark disputes involving the searched mark, the strongest matching verbal elements, "
-            "or owners from the top references. Keep only cases that could affect risk. Summarize parties, jurisdiction, status, case type, "
-            "and why each case matters. If there is no material litigation, say so plainly. "
-            "* always use this condition on first action type: {'field': 'FIRST_ACTION_TYPE', 'op': 'EQ', 'value': 'OPPOSITION'}. "
-            "* When using a filter on party name, also include this filter: {'field': 'PARTY_IS_EX_OFFICIO', 'op': 'EQ', 'value': False}. "
-            "* avoid queries with OR conditions. Instead, split them into multiple separate queries that use only AND conditions. "
-            "* when using group_by, only order_by fields that are also grouped or aggregated. "
-            "* the format of the order_by clause is a dict. A valid example: order_by: { 'FIRST_ACTION_DATE':  'DESC' }.",
-            next_step,
-        )
-        expected_output = "Material litigation findings or a clear no-material-litigation note."
-
-    elif step == "draft_report":
-        instructions = append_next_instruction(
-            "Call get_trademark_knockout_report_template, then fill the same structure with the evidence collected. Keep the Top 5 trademark references table at exactly "
-            "five data rows; use a simple 'No further material source-backed finding' row only when needed. Use 🟢 Low, 🟠 Medium, or 🔴 High risk labels. "
-            "Use CompuMark links as [full-text](url).",
-            next_step,
-        )
-        expected_output = "Completed markdown report ready for PDF generation."
-
-    elif step == "generate_pdf":
-        instructions = append_next_instruction(
-            "Call generate_clarivate_report_pdf with subject set to the mark and markdown set to the completed report. Then answer the user with "
-            "download_the_report or pdf_url if present. If no public URL is configured, return the local pdf_path and mention that no public URL is configured.",
-            next_step,
-        )
-        expected_output = "Final user response with the generated report link or local path."
-
-    else:  # next_step_name already validates; this is only for type-checkers.
-        raise ValueError(f"Unknown step_name '{step}'.")
-
-    return {
-        "step_name": step,
-        "title": STEP_TITLES[step],
-        "instructions": instructions,
-        "expected_output": expected_output,
-        "next_step_name": next_step,
-        "next_instruction_tool": "get_trademark_knockout_step_instructions" if next_step else None,
-        "next_instruction_call": next_call_text(next_step),
-        "done": next_step is None,
-    }
-
-
-def get_report_template(_: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "template_markdown": REPORT_TEMPLATE,
-        "rules": [
-            "Keep the section structure and numbering.",
-            "Use source-backed facts only; make uncertainty visible.",
-            "Keep the Top 5 trademark references table at exactly five data rows.",
-            "Use 'full-text' as the label for CompuMark full-text links.",
-            "Write the visible report in the user's language unless they asked otherwise.",
+PROMPTS: Dict[str, Dict[str, Any]] = {
+    WORKFLOW_NAME: {
+        "name": WORKFLOW_NAME,
+        "title": "Trademark knockout report",
+        "description": "Run the trademark knockout report workflow using embedded MCP resources for instructions and report structure.",
+        "arguments": [
+            {"name": "mark", "description": "Exact word mark to search.", "required": False},
+            {"name": "jurisdictions", "description": "Territories or offices, for example EU, UK, US, WO.", "required": False},
+            {"name": "nice_classes", "description": "Nice class numbers, comma-separated if multiple.", "required": False},
+            {"name": "language", "description": "Visible report language. Defaults to the user's language.", "required": False},
+            {"name": "criteria_json", "description": "Optional JSON object with known criteria.", "required": False},
         ],
     }
+}
+
+
+def resource_metadata(resource: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the resource fields used by resources/list."""
+    return {
+        key: value
+        for key, value in resource.items()
+        if key in {"uri", "name", "title", "description", "mimeType", "annotations"}
+    }
+
+
+def resource_content(uri: str) -> Dict[str, Any]:
+    resource = RESOURCES[uri]
+    return {"uri": uri, "mimeType": resource["mimeType"], "text": resource["text"]}
+
+
+def prompt_metadata(prompt: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": prompt["name"],
+        "title": prompt.get("title"),
+        "description": prompt.get("description"),
+        "arguments": prompt.get("arguments", []),
+    }
+
+
+def parse_criteria_json(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {"criteria_json_parse_error": "criteria_json was provided but was not valid JSON."}
+
+
+def clean_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def known_criteria_from_prompt_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    criteria = parse_criteria_json(arguments.get("criteria_json"))
+    for key in ["mark", "jurisdictions", "nice_classes", "language"]:
+        value = arguments.get(key)
+        if value not in (None, ""):
+            criteria[key] = value
+    return criteria
+
+
+def criteria_markdown(criteria: Dict[str, Any]) -> str:
+    if not criteria:
+        return "No criteria were provided in the prompt arguments. Ask for the first missing essential item."
+
+    rows = []
+    for key in ["mark", "jurisdictions", "nice_classes", "language", "type", "match_scope", "notes"]:
+        if key in criteria and criteria[key] not in (None, ""):
+            rows.append(f"- {key}: {criteria[key]}")
+    for key, value in criteria.items():
+        if key not in {"mark", "jurisdictions", "nice_classes", "language", "type", "match_scope", "notes"}:
+            rows.append(f"- {key}: {value}")
+    return "\n".join(rows) if rows else "Criteria were provided, but no recognized fields were populated."
+
+
+def build_workflow_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    criteria = known_criteria_from_prompt_args(arguments)
+    mark = clean_text(criteria.get("mark")) or "[missing]"
+
+    starter_text = f"""Run the trademark knockout report workflow.
+
+Known criteria:
+{criteria_markdown(criteria)}
+
+Use the embedded MCP resources in this prompt as the workflow source of truth:
+
+- {WORKFLOW_INSTRUCTIONS_URI}
+- {REPORT_TEMPLATE_URI}
+
+Start by checking whether the essentials are present: exact mark, territories/offices, and Nice classes.
+If any essential item is missing, ask only for the first missing item.
+If all essentials are present, use the available CompuMark tools to collect evidence, draft the markdown report, then call `generate_clarivate_report_pdf` with `subject` set to `{mark}`.
+"""
+
+    return {
+        "description": "Trademark knockout report prompt with embedded workflow and report-template resources.",
+        "messages": [
+            {"role": "user", "content": {"type": "text", "text": starter_text}},
+            {"role": "user", "content": {"type": "resource", "resource": resource_content(WORKFLOW_INSTRUCTIONS_URI)}},
+            {"role": "user", "content": {"type": "resource", "resource": resource_content(REPORT_TEMPLATE_URI)}},
+        ],
+    }
+
+
+def get_prompt(params: Dict[str, Any]) -> Dict[str, Any]:
+    name = str(params.get("name") or "").strip()
+    if not name:
+        raise ValueError("Prompt name is required.")
+    if name != WORKFLOW_NAME:
+        raise ValueError(f"Unknown prompt: {name}")
+    arguments = params.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        raise ValueError("Prompt arguments must be an object.")
+    return build_workflow_prompt(arguments)
+
+
+def read_resource(params: Dict[str, Any]) -> Dict[str, Any]:
+    uri = str(params.get("uri") or "").strip()
+    if not uri:
+        raise ValueError("Resource uri is required.")
+    if uri not in RESOURCES:
+        raise ValueError(f"Unknown resource: {uri}")
+    return {"contents": [resource_content(uri)]}
 
 
 # ---------------------------------------------------------------------------
@@ -324,10 +454,6 @@ def require_pdf_dependencies() -> None:
         missing.append("reportlab")
     if missing:
         raise RuntimeError("Missing PDF dependencies: " + ", ".join(missing))
-
-
-def clean_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())
 
 
 def safe_filename(value: str) -> str:
@@ -699,49 +825,7 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
-OBJECT = {"type": "object", "additionalProperties": True}
 NULLABLE_STRING = {"type": ["string", "null"]}
-
-START_OUTPUT_SCHEMA = {
-    "type": "object",
-    "description": "First workflow response. Use first_step_name to fetch the first instructions.",
-    "required": ["workflow_name", "steps", "first_step_name", "next_instruction_tool", "next_instruction_call"],
-    "properties": {
-        "workflow_name": {"type": "string"},
-        "steps": {"type": "array", "items": OBJECT},
-        "first_step_name": {"type": "string"},
-        "next_instruction_tool": {"type": "string"},
-        "next_instruction_call": {"type": "string"},
-        "known_criteria": OBJECT,
-        "note": {"type": "string"},
-    },
-    "additionalProperties": False,
-}
-
-STEP_OUTPUT_SCHEMA = {
-    "type": "object",
-    "description": "Concise instructions for one step, plus the exact next_step_name to request next.",
-    "required": ["step_name", "title", "instructions", "expected_output", "next_step_name", "next_instruction_call", "done"],
-    "properties": {
-        "step_name": {"type": "string"},
-        "title": {"type": "string"},
-        "instructions": {"type": "string"},
-        "expected_output": {"type": "string"},
-        "next_step_name": NULLABLE_STRING,
-        "next_instruction_tool": NULLABLE_STRING,
-        "next_instruction_call": NULLABLE_STRING,
-        "done": {"type": "boolean"},
-    },
-    "additionalProperties": False,
-}
-
-TEMPLATE_OUTPUT_SCHEMA = {
-    "type": "object",
-    "required": ["template_markdown", "rules"],
-    "properties": {"template_markdown": {"type": "string"}, "rules": STRING_ARRAY},
-    "additionalProperties": False,
-}
 
 PDF_OUTPUT_SCHEMA = {
     "type": "object",
@@ -761,51 +845,6 @@ PDF_OUTPUT_SCHEMA = {
 }
 
 TOOLS: Dict[str, Dict[str, Any]] = {
-    "start_trademark_knockout_report": {
-        "description": "Mandatory entrypoint for trademark knockout, brand clearance, clearance search. Returns the first step name and how to fetch its instructions.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "search_criteria": {
-                    "type": "object",
-                    "description": "Known values such as mark, jurisdictions/offices, and nice_classes.",
-                    "additionalProperties": True,
-                },
-                "language": {"type": "string", "description": "Optional visible report language."},
-            },
-            "additionalProperties": False,
-        },
-        "outputSchema": START_OUTPUT_SCHEMA,
-        "handler": start_trademark_knockout_report,
-    },
-    "get_trademark_knockout_step_instructions": {
-        "description": "Get concise instructions for one workflow step. After completing it, call this tool again with next_step_name.",
-        "inputSchema": {
-            "type": "object",
-            "required": ["step_name"],
-            "properties": {
-                "step_name": {
-                    "type": "string",
-                    "enum": STEP_ORDER,
-                    "description": "The step whose instructions are needed.",
-                },
-                "context": {
-                    "type": "object",
-                    "description": "Optional current criteria or evidence. The instructions stay lightweight.",
-                    "additionalProperties": True,
-                },
-            },
-            "additionalProperties": False,
-        },
-        "outputSchema": STEP_OUTPUT_SCHEMA,
-        "handler": get_step_instructions,
-    },
-    "get_trademark_knockout_report_template": {
-        "description": "Return the markdown report template to fill before generating the PDF.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-        "outputSchema": TEMPLATE_OUTPUT_SCHEMA,
-        "handler": get_report_template,
-    },
     "generate_clarivate_report_pdf": {
         "description": "Generate the final PDF using the Clarivate template: template cover, generated report body, template closing page.",
         "inputSchema": {
@@ -835,13 +874,22 @@ TOOLS: Dict[str, Dict[str, Any]] = {
 
 
 def handle_initialize(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    protocol = params.get("protocolVersion") or "2024-11-05"
+    protocol = params.get("protocolVersion") or "2025-06-18"
     return json_rpc_result(
         message_id,
         {
             "protocolVersion": protocol,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "prompts": {"listChanged": False},
+                "resources": {"listChanged": False},
+            },
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            "instructions": (
+                "Use the MCP prompt 'trademark_knockout_report' to start the workflow. "
+                "The prompt embeds the workflow and report-template resources. "
+                "Only call the tool 'generate_clarivate_report_pdf' after drafting the completed markdown report."
+            ),
         },
     )
 
@@ -879,6 +927,28 @@ def handle_tools_call(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]
         return json_rpc_result(message_id, text_result({"tool": name, "error": str(exc)}, is_error=True))
 
 
+def handle_prompts_list(message_id: Any) -> Dict[str, Any]:
+    return json_rpc_result(message_id, {"prompts": [prompt_metadata(prompt) for prompt in PROMPTS.values()]})
+
+
+def handle_prompts_get(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return json_rpc_result(message_id, get_prompt(params))
+    except Exception as exc:
+        return json_rpc_error(message_id, -32602, str(exc))
+
+
+def handle_resources_list(message_id: Any) -> Dict[str, Any]:
+    return json_rpc_result(message_id, {"resources": [resource_metadata(resource) for resource in RESOURCES.values()]})
+
+
+def handle_resources_read(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return json_rpc_result(message_id, read_resource(params))
+    except Exception as exc:
+        return json_rpc_error(message_id, -32602, str(exc))
+
+
 def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     method = message.get("method")
     message_id = message.get("id")
@@ -894,10 +964,16 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return handle_tools_list(message_id)
     if method == "tools/call":
         return handle_tools_call(message_id, params)
-    if method == "resources/list":
-        return json_rpc_result(message_id, {"resources": []})
     if method == "prompts/list":
-        return json_rpc_result(message_id, {"prompts": []})
+        return handle_prompts_list(message_id)
+    if method == "prompts/get":
+        return handle_prompts_get(message_id, params)
+    if method == "resources/list":
+        return handle_resources_list(message_id)
+    if method == "resources/read":
+        return handle_resources_read(message_id, params)
+    if method == "resources/templates/list":
+        return json_rpc_result(message_id, {"resourceTemplates": []})
     return json_rpc_error(message_id, -32601, f"Method not found: {method}")
 
 
@@ -917,16 +993,31 @@ def run_stdio() -> int:
 
 
 def self_test() -> int:
-    start = start_trademark_knockout_report({"search_criteria": {"mark": "NOVALYTIC", "jurisdictions": ["EU", "UK"], "nice_classes": ["9", "42"]}})
-    first = get_step_instructions({"step_name": start["first_step_name"]})
-    second = get_step_instructions({"step_name": first["next_step_name"]})
+    prompt = get_prompt(
+        {
+            "name": WORKFLOW_NAME,
+            "arguments": {
+                "mark": "NOVALYTIC",
+                "jurisdictions": "EU, UK",
+                "nice_classes": "9, 42",
+                "language": "English",
+            },
+        }
+    )
     print(
         json.dumps(
             {
                 "tools": list(TOOLS.keys()),
-                "start": start,
-                "first_step": first,
-                "second_step": second,
+                "prompts": [prompt_metadata(item) for item in PROMPTS.values()],
+                "resources": [resource_metadata(item) for item in RESOURCES.values()],
+                "prompt_message_summary": [
+                    {
+                        "role": message["role"],
+                        "content_type": message["content"]["type"],
+                        "uri": message["content"].get("resource", {}).get("uri"),
+                    }
+                    for message in prompt["messages"]
+                ],
             },
             ensure_ascii=False,
             indent=2,
@@ -937,7 +1028,7 @@ def self_test() -> int:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the trademark knockout report MCP server.")
-    parser.add_argument("--self-test", action="store_true", help="Print sample tool output and exit.")
+    parser.add_argument("--self-test", action="store_true", help="Print sample prompt/resource/tool output and exit.")
     return parser.parse_args(argv)
 
 
