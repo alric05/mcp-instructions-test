@@ -311,9 +311,11 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     elif step == "draft_report":
         instructions = append_next_instruction(
-            "Call get_trademark_knockout_report_template, then fill the same structure with the evidence collected. Keep the two Top 5 tables at exactly "
+            "You must use the report template available and follow it exactly. "
+            "Call get_trademark_knockout_report_template to get the report template, then fill the same structure with the evidence collected. Keep the two Top 5 tables at exactly "
             "five data rows each; use a simple 'No further material source-backed finding' row only when needed. Use 🟢 Low, 🟠 Medium, or 🔴 High risk labels. "
-            "Use CompuMark links as [full-text](url) and ordinary web links with domain labels.",
+            "Use CompuMark links as [full-text](url) and ordinary web links with domain labels. "
+            "Once you got the template, always move on to the next step to generate the PDF using the available tool. The user always wants the PDF even if not explicitly said.",
             next_step,
         )
         expected_output = "Completed markdown report ready for PDF generation."
