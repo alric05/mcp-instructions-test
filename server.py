@@ -1,22 +1,11 @@
 #!/usr/bin/env python3
-"""Small tools-only MCP server for a trademark knockout report POC.
+"""Small MCP server for a trademark knockout report POC.
 
-This version is optimized for ChatGPT-style clients, where the model reliably
-starts work by calling tools rather than by letting the user select MCP prompts.
+The server does two things only:
+1. Gives concise staged instructions for an agent that will use the CompuMark MCP tools.
+2. Generates the final PDF by merging a markdown report into the Clarivate PDF template.
 
-The server exposes two tools only:
-
-1. prepare_trademark_knockout_report
-   - Mandatory kickoff/context tool.
-   - Returns explicit workflow instructions and the exact report template.
-   - Tells the agent what is missing, or that it is ready to proceed.
-
-2. generate_clarivate_report_pdf
-   - Mandatory final tool.
-   - Validates that the report still follows the required template shape.
-   - Renders the completed markdown into the Clarivate PDF template.
-
-This is intentionally simple POC code, not a production-grade MCP framework.
+It intentionally does not try to re-describe the CompuMark API or over-control the agent.
 """
 
 from __future__ import annotations
@@ -49,7 +38,7 @@ except ImportError:  # pragma: no cover - runtime dependency guard
 
 
 SERVER_NAME = "trademark-knockout-report-workflow"
-SERVER_VERSION = "0.5.0-tools-only-poc"
+SERVER_VERSION = "0.2.0"
 WORKFLOW_NAME = "trademark_knockout_report"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -71,55 +60,31 @@ SUBTITLE_FONT_SIZE = 22
 LINK_RE = re.compile(r"\[([^\]]+)]\((https?://[^)\s]+)\)")
 PIPE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
-REQUIRED_MARKDOWN_HEADINGS = [
-    "# AI Generated Trademark Knockout Search Report (Demo only)",
-    "## 1. Search Criteria",
-    "## 2. CompuMark Search Results",
-    "### 2.1 Summary",
-    "### 2.2 Most Relevant Trademark References (Top 5)",
-    "### 2.3 Litigation Activity",
-    "### 2.4 Trademark Assessment Comments",
-    "## 3. Key Takeaways",
-    "Disclaimer",
+STEP_ORDER = [
+    "criteria",
+    "trademark_search",
+    "litigation_search",
+    "online_presence",
+    "draft_report",
+    "generate_pdf",
 ]
 
-COMMON_TEMPLATE_PLACEHOLDERS = [
-    "[MARK]",
-    "[DATE]",
-    "[Word / Logo / Both]",
-    "[EU / UK / US / WIPO designations / Other]",
-    "[CLASS NUMBERS, if known]",
-    "[Exact only / Contains / Phonetic / Plurals]",
-    "[Any limitations, exclusions, or assumptions]",
-    "[NUMBER / APPROX.]",
-    "[LIST]",
-    "[🟢 Low / 🟠 Medium / 🔴 High]",
-    "[VERBAL ELEMENT 1]",
-    "[VERBAL ELEMENT 2]",
-    "[VERBAL ELEMENT 3]",
-    "[VERBAL ELEMENT 4]",
-    "[VERBAL ELEMENT 5]",
-    "[Status]",
-    "[OFFICE]",
-    "[CLASS]",
-    "[NUMBER]",
-    "[OWNER]",
-    "FULL_TEXT_URL",
-    "[PARTY 1 vs PARTY 2]",
-    "[Opposition / Infringement / Cancellation]",
-    "[COUNTRY]",
-    "[Active / Concluded]",
-    "[Summary]",
-    "[State whether exact matches were found in the main class.]",
-    "[State whether similar or phonetic matches were found.]",
-    "[State whether any exact matches were found outside the main class, if searched.]",
-    "[State which results appear most material and why.]",
-    "[State whether litigation activity was found, the type of case, and if it adds risk.]",
-    "[🟢 Low / 🟠 Medium / 🔴 High concern]",
-    "[Key takeaway 1: concise conclusion on trademark database results.]",
-    "[Key takeaway 2: concise conclusion on relevant litigation, if any.]",
-    "[Key takeaway 3: note on main legal or commercial risk.]",
-    "[Key takeaway 4: optional recommendation, e.g. proceed / proceed with caution / consider narrowing / consider alternate mark.]",
+STEP_TITLES = {
+    "criteria": "Confirm the search criteria",
+    "trademark_search": "Collect CompuMark trademark evidence",
+    "litigation_search": "Check relevant litigation",
+    "online_presence": "Check online presence",
+    "draft_report": "Draft the report markdown",
+    "generate_pdf": "Generate the Clarivate-template PDF",
+}
+
+STEP_SUMMARY = [
+    {"name": "criteria", "purpose": "Confirm mark, territories/offices, Nice classes, and whether web search is allowed."},
+    {"name": "trademark_search", "purpose": "Use CompuMark trademark tools and keep the five most relevant records."},
+    {"name": "litigation_search", "purpose": "Check whether the mark, top references, or owners appear in material trademark disputes."},
+    {"name": "online_presence", "purpose": "Look for material web, company, product, domain, and social-use signals."},
+    {"name": "draft_report", "purpose": "Fill the report template with source-backed evidence."},
+    {"name": "generate_pdf", "purpose": "Render the report with the Clarivate PDF template and return the link/path."},
 ]
 
 REPORT_TEMPLATE = """# AI Generated Trademark Knockout Search Report (Demo only)
@@ -180,12 +145,41 @@ Date of report: [DATE]
 
 ---
 
-## 3. Key Takeaways
+## 3. Online Presence Search
+
+### 3.1 Summary
+
+| Item                         | Result                                                |
+| ---------------------------- | ----------------------------------------------------- |
+| Exact same name found online | [Yes / No / Limited / Not performed (user opted out)] |
+| Similar names found online   | [Yes / No / Not performed (user opted out)]           |
+| Commercial use observed      | [Yes / No / Limited / Not performed (user opted out)] |
+
+### 3.2 Most Relevant Web Findings (Top 5)
+
+| Name / Sign | Webpage URL / Source      | Territory          | Type of use                                         | Notes            |
+| ----------- | ------------------------- | ------------------ | --------------------------------------------------- | ---------------- |
+| [NAME 1]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 2]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 3]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 4]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+| [NAME 5]    | [domain.tld](WEBPAGE_URL) | [COUNTRY / REGION] | [Brand / Company / Product / Domain / Social media] | [Why it matters] |
+
+### 3.3 Web Search Comments
+
+- [State whether the searched name appears to be in active commercial use online.]
+- [State whether similar names create practical marketplace overlap.]
+- [State whether any domain or branding conflicts are notable.]
+- [If web search was not run, state: "Online presence search not performed (user opted out)."]
+
+---
+
+## 4. Key Takeaways
 
 Overall clearance view: [🟢 Low / 🟠 Medium / 🔴 High concern]
 
 - [Key takeaway 1: concise conclusion on trademark database results.]
-- [Key takeaway 2: concise conclusion on relevant litigation, if any.]
+- [Key takeaway 2: concise conclusion on online use / marketplace presence.]
 - [Key takeaway 3: note on main legal or commercial risk.]
 - [Key takeaway 4: optional recommendation, e.g. proceed / proceed with caution / consider narrowing / consider alternate mark.]
 
@@ -195,73 +189,6 @@ Disclaimer
 
 This report is produced for informational purposes only and does not constitute legal advice. Trademark clearance searches are not exhaustive and do not guarantee the availability or registrability of a mark. Always consult a qualified trademark attorney before filing.
 """
-
-MUST_FOLLOW_RULES = [
-    "This workflow is mandatory for trademark knockout, clearance, brand availability, or similar report requests.",
-    "Call prepare_trademark_knockout_report first for those requests. Do not skip this kickoff tool.",
-    "If prepare_trademark_knockout_report returns status='needs_clarification', ask only the clarifying_question and stop. Do not run searches yet.",
-    "If status='ready', follow every workflow step in order before giving a final answer.",
-    "Do not invent evidence. Use source-backed facts from CompuMark tools only, and make uncertainty visible.",
-    "Do not use the CompuMark knockout-search tool. Use the trademark-search, trademark-content, and litigation-search tools as instructed.",
-    "Do not change the report template headings, numbering, section order, or required Top 5 table shape.",
-    "The Top 5 trademark references table must contain exactly five data rows. Use 'No further material source-backed finding' rows if fewer than five material records exist.",
-    "The final user-facing reply must not be a loose text report. It must finish with the PDF generated by generate_clarivate_report_pdf.",
-    "Call generate_clarivate_report_pdf as the final action after drafting the markdown. Return download_the_report or pdf_url if present; otherwise return pdf_path and say no public URL is configured.",
-]
-
-WORKFLOW_STEPS = [
-    "1. Confirm exact mark, territories or registration offices, and Nice classes.",
-    "2. Run limited CompuMark trademark searches and select the five most relevant records.",
-    "3. Fetch trademark-content for selected records and create links labeled exactly 'full-text'.",
-    "4. Run a light CompuMark litigation check for the searched mark, top references, or relevant owners.",
-    "5. Fill the provided markdown template without changing its structure.",
-    "6. Call generate_clarivate_report_pdf with subject set to the searched mark and markdown set to the completed report.",
-    "7. Reply to the user with the generated PDF link/path, not with an unfinished draft.",
-]
-
-TRADEMARK_SEARCH_RULES = [
-    "Perform at most three trademark searches: exact without phonetics, exact with phonetics, contains with phonetics.",
-    "Only proceed to the next search if fewer than five useful results have been found.",
-    "Start with the exact search in the requested offices and Nice classes.",
-    "Only search using the verbal element given by the user. Do not invent spelling variants or alternate marks.",
-    "Select records by exactness, territory/office relevance, class overlap, active/live status, owner relevance, and apparent commercial significance.",
-    "For selected IDs, fetch trademark-content and create CompuMark full-text links labeled exactly 'full-text'.",
-    "Do not fetch goods for this POC.",
-    "Avoid country-code lookup tools if possible. Use common office/country codes from internal knowledge where practical.",
-    "For INT_CLASS_NUMBER, use operator 'EQUALS' with a comma-separated value such as '3,4,5' to search multiple Nice classes in one request.",
-    "If a specific country is specified, also include 'WO' with limitWOresultsToDesignated=true in search parameters.",
-    "If an EU country is specified, also include 'EM' and 'WO' with limitWOresultsToDesignated=true in search parameters.",
-]
-
-LITIGATION_SEARCH_RULES = [
-    "Use the CompuMark litigation-search tool lightly; do not over-search.",
-    "Search material disputes involving the searched mark, strongest matching verbal elements, or owners from the top references.",
-    "Keep only cases that could affect risk. Summarize parties, jurisdiction, status, case type, and why each case matters.",
-    "If there is no material litigation, say so plainly in the report.",
-    "Always use this first-action condition in the first query: {'field': 'FIRST_ACTION_TYPE', 'op': 'EQ', 'value': 'OPPOSITION'}.",
-    "When filtering on party name, also include: {'field': 'PARTY_IS_EX_OFFICIO', 'op': 'EQ', 'value': False}.",
-    "Avoid OR conditions. Split into multiple separate queries that use only AND conditions.",
-    "When using group_by, only order_by fields that are also grouped or aggregated.",
-    "The order_by clause must be a dict, for example: {'FIRST_ACTION_DATE': 'DESC'}.",
-]
-
-REPORT_DRAFTING_RULES = [
-    "Use the report_template returned by prepare_trademark_knockout_report.",
-    "Keep every heading, section number, section order, table header, and disclaimer structure intact.",
-    "Fill placeholders with source-backed evidence. Do not leave obvious placeholders such as [MARK] or [DATE] in the final markdown.",
-    "Use one of these exact risk labels: 🟢 Low, 🟠 Medium, or 🔴 High.",
-    "Keep the Top 5 table at exactly five data rows. If fewer than five records exist, fill remaining rows with 'No further material source-backed finding'.",
-    "Use CompuMark links as [full-text](url). The visible link label must be exactly 'full-text'.",
-    "Keep the report concise. Do not add unrequested sections or change the template into a narrative memo.",
-]
-
-FINAL_RESPONSE_RULES = [
-    "After report drafting, call generate_clarivate_report_pdf. This is mandatory.",
-    "Do not present the final report to the user as plain markdown instead of generating the PDF.",
-    "If the PDF tool returns download_the_report or pdf_url, give that to the user.",
-    "If there is no public URL, give pdf_path and mention that no public URL is configured.",
-    "Keep the final response concise and centered on the generated PDF.",
-]
 
 
 # ---------------------------------------------------------------------------
@@ -289,217 +216,141 @@ def json_rpc_error(message_id: Any, code: int, message: str, data: Any = None) -
 
 
 # ---------------------------------------------------------------------------
-# Kickoff/context tool
+# Workflow instruction tools
 # ---------------------------------------------------------------------------
 
 
-def clean_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())
+def next_step_name(step_name: str) -> Optional[str]:
+    if step_name not in STEP_ORDER:
+        raise ValueError(f"Unknown step_name '{step_name}'. Expected one of: {', '.join(STEP_ORDER)}")
+    index = STEP_ORDER.index(step_name)
+    return STEP_ORDER[index + 1] if index + 1 < len(STEP_ORDER) else None
 
 
-def parse_criteria_json(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return dict(value)
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(str(value))
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {"criteria_json_parse_error": "criteria_json was provided but was not valid JSON."}
+def next_call_text(next_step: Optional[str]) -> Optional[str]:
+    if next_step is None:
+        return None
+    return f"Call get_trademark_knockout_step_instructions with step_name='{next_step}'."
 
 
-def known_criteria_from_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge criteria from loose tool arguments.
-
-    The function is permissive on purpose because different clients may infer
-    slightly different argument shapes from natural language.
-    """
-    criteria: Dict[str, Any] = {}
-
-    for key in ["criteria", "search_criteria"]:
-        nested = arguments.get(key)
-        if isinstance(nested, dict):
-            criteria.update(nested)
-
-    criteria.update(parse_criteria_json(arguments.get("criteria_json")))
-
-    for key in [
-        "mark",
-        "jurisdictions",
-        "territories",
-        "offices",
-        "registration_offices",
-        "nice_classes",
-        "classes",
-        "nice_class_numbers",
-        "int_class_numbers",
-        "language",
-        "type",
-        "match_scope",
-        "notes",
-    ]:
-        value = arguments.get(key)
-        if value not in (None, ""):
-            criteria[key] = value
-
-    return criteria
+def append_next_instruction(body: str, next_step: Optional[str]) -> str:
+    if next_step is None:
+        return body + "\n\nThis is the final step; do not call another instruction step."
+    return body + f"\n\nWhen you are done with this, call get_trademark_knockout_step_instructions with step_name='{next_step}'."
 
 
-def has_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, tuple, set, dict)):
-        return bool(value)
-    return True
-
-
-def criteria_value(criteria: Dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = criteria.get(key)
-        if has_value(value):
-            return value
-    return None
-
-
-def first_missing_essential(criteria: Dict[str, Any]) -> Optional[str]:
-    if not has_value(criteria_value(criteria, "mark")):
-        return "mark"
-    if not has_value(criteria_value(criteria, "jurisdictions", "territories", "offices", "registration_offices")):
-        return "jurisdictions"
-    if not has_value(criteria_value(criteria, "nice_classes", "classes", "nice_class_numbers", "int_class_numbers")):
-        return "nice_classes"
-    return None
-
-
-def clarifying_question(missing: Optional[str]) -> Optional[str]:
-    if missing == "mark":
-        return "What exact word mark should I search?"
-    if missing == "jurisdictions":
-        return "Which territories or registration offices should I cover, for example EU, UK, US, or WO?"
-    if missing == "nice_classes":
-        return "Which Nice classes should I cover?"
-    return None
-
-
-def prepare_trademark_knockout_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Mandatory kickoff tool for trademark knockout report requests."""
-    criteria = known_criteria_from_args(arguments)
-    missing = first_missing_essential(criteria)
-    ready = missing is None
-
-    if ready:
-        next_action = (
-            "Proceed with the workflow now. Use the separate CompuMark tools to collect trademark and litigation evidence, "
-            "draft the report in the exact provided template, then call generate_clarivate_report_pdf before replying to the user."
-        )
-    else:
-        next_action = (
-            "Ask the user only the clarifying_question and stop. Do not run CompuMark searches and do not draft or generate a report yet."
-        )
-
+def start_trademark_knockout_report(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    first_step = STEP_ORDER[0]
     return {
         "workflow_name": WORKFLOW_NAME,
-        "status": "ready" if ready else "needs_clarification",
-        "known_criteria": criteria,
-        "missing_required_field": missing,
-        "clarifying_question": clarifying_question(missing),
-        "next_action": next_action,
-        "must_follow_rules": MUST_FOLLOW_RULES,
-        "workflow_steps": WORKFLOW_STEPS,
-        "compumark_trademark_search_rules": TRADEMARK_SEARCH_RULES,
-        "compumark_litigation_search_rules": LITIGATION_SEARCH_RULES,
-        "report_drafting_rules": REPORT_DRAFTING_RULES,
-        "final_response_rules": FINAL_RESPONSE_RULES,
-        "report_template": REPORT_TEMPLATE,
-        "final_pdf_tool": "generate_clarivate_report_pdf",
-        "final_response_instruction": (
-            "The final answer to the end user must include the PDF produced by generate_clarivate_report_pdf. "
-            "Use download_the_report or pdf_url when available; otherwise use pdf_path and mention that no public URL is configured."
-        ),
+        "steps": STEP_SUMMARY,
+        "first_step_name": first_step,
+        "next_instruction_tool": "get_trademark_knockout_step_instructions",
+        "next_instruction_call": next_call_text(first_step),
+        "known_criteria": arguments.get("search_criteria") or arguments.get("criteria") or {},
+        "note": "Follow the steps in order. After each step, use next_step_name to fetch the next instructions.",
     }
 
 
-# ---------------------------------------------------------------------------
-# Markdown validation guardrails
-# ---------------------------------------------------------------------------
+def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    step = str(arguments.get("step_name") or "").strip()
+    if not step:
+        raise ValueError("step_name is required.")
+    next_step = next_step_name(step)
 
-
-def top5_trademark_table_rows(markdown_text: str) -> Optional[List[List[str]]]:
-    heading = "### 2.2 Most Relevant Trademark References (Top 5)"
-    if heading not in markdown_text:
-        return None
-
-    after_heading = markdown_text.split(heading, 1)[1]
-    section_lines: List[str] = []
-    for raw_line in after_heading.splitlines():
-        line = raw_line.rstrip()
-        if line.startswith("### ") or line.startswith("## "):
-            break
-        section_lines.append(line)
-
-    table_lines = [line.strip() for line in section_lines if is_table_line(line.strip())]
-    rows = normalize_table(table_lines)
-    return rows or None
-
-
-def validate_report_markdown(markdown_text: str) -> Dict[str, Any]:
-    """Small, opinionated POC validation to stop obvious agent drift.
-
-    This intentionally checks only the structural requirements that matter most:
-    required headings, the exact Top 5 table shape, and unresolved template
-    placeholders. It is not a full markdown parser.
-    """
-    errors: List[str] = []
-    warnings: List[str] = []
-
-    for heading in REQUIRED_MARKDOWN_HEADINGS:
-        if heading not in markdown_text:
-            errors.append(f"Missing required template heading or marker: {heading}")
-
-    top5_rows = top5_trademark_table_rows(markdown_text)
-    top5_count: Optional[int] = None
-    if top5_rows is None:
-        errors.append("Could not find the Top 5 trademark references table.")
-    else:
-        expected_header = [
-            "Verbal Element",
-            "Status",
-            "Registration Office",
-            "Class(es)",
-            "Number",
-            "Date",
-            "Owner",
-            "Full Text URL",
-        ]
-        header = top5_rows[0] if top5_rows else []
-        if header != expected_header:
-            errors.append("The Top 5 trademark references table header was changed. Keep the exact template columns.")
-        top5_count = max(0, len(top5_rows) - 1)
-        if top5_count != 5:
-            errors.append(f"The Top 5 trademark references table must contain exactly 5 data rows; found {top5_count}.")
-
-    unresolved = [placeholder for placeholder in COMMON_TEMPLATE_PLACEHOLDERS if placeholder in markdown_text]
-    if unresolved:
-        errors.append(
-            "The markdown still contains template placeholders. Replace them before generating the PDF: "
-            + ", ".join(unresolved[:12])
-            + (" ..." if len(unresolved) > 12 else "")
+    if step == "criteria":
+        instructions = append_next_instruction(
+            "Confirm only the essentials: exact mark, territories or registration offices, and Nice classes. "
+            "If one is missing, ask only for the first missing item. Assume web search is allowed unless the user opted out. "
+            "Do not run CompuMark searches in this step.",
+            next_step,
         )
+        expected_output = "A small criteria object: mark, jurisdictions/offices, nice_classes, and optional web_search_enabled."
 
-    if "FULL_TEXT_URL" in markdown_text:
-        errors.append("The markdown still contains FULL_TEXT_URL placeholders. Replace each with a real CompuMark full-text URL or a clear no-finding row.")
+    elif step == "trademark_search":
+        instructions = append_next_instruction(
+            "Use the CompuMark trademark-search tool to find the most relevant records. Do not use the knockout-search tool. "
+            "Perform at most three trademark searches. An exact search without phonetics, an exact search with phonetics, and a contain search with phonetics. " 
+            "Only proceed to next search if you have less than five results. Start with the exact search "
+            "in the requested offices and classes. "
+            "Select five records by exactness, territory, class overlap, active status, and owner relevance. For those IDs, fetch trademark-content "
+            "and create full-text links. Do not fetch goods. "
+            "only do trademark searches using the verbal element given by the user, no variations. "
+            "* Avoid calling country code lookup tools if possible. Use your internal knowledge of country codes when possible."
+            "* For INT_CLASS_NUMBER, use operator: 'EQUALS' with a comma-separated value such as '3,4,5' to search multiple Nice classes in one request. "
+            "* If a specific country is specified, also include 'WO' with 'limitWOresultsToDesignated': true in search parameters."
+            "* If an EU country is specified, also include 'EM' and 'WO' with 'limitWOresultsToDesignated': true in search parameters.",
+            next_step,
+        )
+        expected_output = "Top trademark references, content for selected IDs, and full-text links labeled 'full-text'."
 
-    if not any(label in markdown_text for label in ["🟢 Low", "🟠 Medium", "🔴 High"]):
-        errors.append("The report must include one of the exact risk labels: 🟢 Low, 🟠 Medium, or 🔴 High.")
+    elif step == "litigation_search":
+        instructions = append_next_instruction(
+            "Use the CompuMark litigation-search tool lightly for trademark disputes involving the searched mark, the strongest matching verbal elements, "
+            "or owners from the top references. Keep only cases that could affect risk. Summarize parties, jurisdiction, status, case type, "
+            "and why each case matters. If there is no material litigation, say so plainly. "
+            "* always use this condition on first action type: {'field': 'FIRST_ACTION_TYPE', 'op': 'EQ', 'value': 'OPPOSITION'}. "
+            "* When using a filter on party name, also include this filter: {'field': 'PARTY_IS_EX_OFFICIO', 'op': 'EQ', 'value': False}. "
+            "* avoid queries with OR conditions. Instead, split them into multiple separate queries that use only AND conditions. "
+            "* when using group_by, only order_by fields that are also grouped or aggregated. "
+            "* the format of the order_by clause is a dict. A valid example: order_by: { 'FIRST_ACTION_DATE':  'DESC' }.",
+            next_step,
+        )
+        expected_output = "Material litigation findings or a clear no-material-litigation note."
+
+    elif step == "online_presence":
+        instructions = append_next_instruction(
+            "Use the SerpApi Google Search tool to perform an online presence search, unless the user explicitly opted out. "
+            "Determine whether the searched name has meaningful real-world use in domains, software/apps, products, marketplaces, or branding. "
+            "Do not limit the search to any region. "
+            "Keep only the five most relevant findings, prioritizing companies, products, domains, social profiles, app/software listings, and marketplace conflicts. "
+            "Cite each finding with a clear domain label.",
+            next_step,
+        )        
+        expected_output = "Top web findings and a brief view on whether online use increases practical risk."
+
+    elif step == "draft_report":
+        instructions = append_next_instruction(
+            "Call get_trademark_knockout_report_template, then fill the same structure with the evidence collected. Keep the two Top 5 tables at exactly "
+            "five data rows each; use a simple 'No further material source-backed finding' row only when needed. Use 🟢 Low, 🟠 Medium, or 🔴 High risk labels. "
+            "Use CompuMark links as [full-text](url) and ordinary web links with domain labels.",
+            next_step,
+        )
+        expected_output = "Completed markdown report ready for PDF generation."
+
+    elif step == "generate_pdf":
+        instructions = append_next_instruction(
+            "Call generate_clarivate_report_pdf with subject set to the mark and markdown set to the completed report. Then answer the user with "
+            "download_the_report or pdf_url if present. If no public URL is configured, return the local pdf_path and mention that no public URL is configured.",
+            next_step,
+        )
+        expected_output = "Final user response with the generated report link or local path."
+
+    else:  # next_step_name already validates; this is only for type-checkers.
+        raise ValueError(f"Unknown step_name '{step}'.")
 
     return {
-        "valid": not errors,
-        "errors": errors,
-        "warnings": warnings,
-        "top5_trademark_reference_rows": top5_count,
+        "step_name": step,
+        "title": STEP_TITLES[step],
+        "instructions": instructions,
+        "expected_output": expected_output,
+        "next_step_name": next_step,
+        "next_instruction_tool": "get_trademark_knockout_step_instructions" if next_step else None,
+        "next_instruction_call": next_call_text(next_step),
+        "done": next_step is None,
+    }
+
+
+def get_report_template(_: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "template_markdown": REPORT_TEMPLATE,
+        "rules": [
+            "Keep the section structure and numbering.",
+            "Use source-backed facts only; make uncertainty visible.",
+            "Keep each Top 5 table at exactly five data rows.",
+            "Use 'full-text' as the label for CompuMark full-text links and domain labels for web links.",
+            "Write the visible report in the user's language unless they asked otherwise.",
+        ],
     }
 
 
@@ -518,6 +369,10 @@ def require_pdf_dependencies() -> None:
         raise RuntimeError("Missing PDF dependencies: " + ", ".join(missing))
 
 
+def clean_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
 def safe_filename(value: str) -> str:
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", clean_text(value)).strip("._-")
     return name or "trademark_report"
@@ -532,7 +387,7 @@ def domain_for(url: str) -> str:
 
 
 def inline_markup(text: str) -> str:
-    """Convert a tiny markdown subset to ReportLab paragraph markup."""
+    """Convert tiny markdown subset to ReportLab paragraph markup."""
     parts: List[str] = []
     last = 0
     for match in LINK_RE.finditer(text):
@@ -821,7 +676,7 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     subject = clean_text(arguments.get("subject") or arguments.get("mark"))
     if not subject:
-        raise ValueError("subject is required. It must be the searched mark.")
+        raise ValueError("subject is required.")
 
     markdown_text = arguments.get("markdown") or arguments.get("markdown_text")
     markdown_path_arg = arguments.get("markdown_path")
@@ -831,21 +686,13 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
             raise FileNotFoundError(f"Markdown report not found: {markdown_path}")
         markdown_text = markdown_path.read_text(encoding="utf-8")
     if not markdown_text or not str(markdown_text).strip():
-        raise ValueError("markdown or markdown_path is required. The completed report markdown must be provided.")
+        raise ValueError("markdown or markdown_path is required.")
 
-    template_validation = validate_report_markdown(str(markdown_text))
-    if not template_validation["valid"]:
-        raise ValueError(
-            "Report markdown does not follow the required template. Fix these issues before generating the PDF: "
-            + "; ".join(template_validation["errors"])
-        )
-
-    if arguments.get("template_path"):
-        raise ValueError("template_path is not accepted in this POC. The tool must use assets/Clarivate_template.pdf.")
-
-    template_path = DEFAULT_TEMPLATE_PATH
+    template_path = Path(arguments.get("template_path") or DEFAULT_TEMPLATE_PATH).expanduser()
+    if not template_path.is_absolute():
+        template_path = BASE_DIR / template_path
     if not template_path.exists():
-        raise FileNotFoundError(f"Clarivate template PDF not found: {template_path}")
+        raise FileNotFoundError(f"Template PDF not found: {template_path}")
 
     output_path = resolve_path(
         arguments.get("output_path"),
@@ -886,10 +733,7 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "markdown_path": str(markdown_output_path.resolve()) if markdown_output_path else None,
         "markdown_url": markdown_url,
         "template_path": str(template_path.resolve()),
-        "template_validation": template_validation,
-        "final_response_instruction": (
-            "Give the user pdf_url/download_the_report when present. If it is null, give pdf_path and mention that no public URL is configured."
-        ),
+        "final_response_instruction": "Give the user pdf_url/download_the_report when present. If it is null, give pdf_path and mention that no public URL is configured.",
     }
 
 
@@ -902,49 +746,49 @@ STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
 OBJECT = {"type": "object", "additionalProperties": True}
 NULLABLE_STRING = {"type": ["string", "null"]}
 
-PREPARE_OUTPUT_SCHEMA = {
+START_OUTPUT_SCHEMA = {
     "type": "object",
-    "description": "Mandatory kickoff response containing the full workflow guardrails and exact markdown template.",
-    "required": [
-        "workflow_name",
-        "status",
-        "known_criteria",
-        "missing_required_field",
-        "clarifying_question",
-        "next_action",
-        "must_follow_rules",
-        "workflow_steps",
-        "compumark_trademark_search_rules",
-        "compumark_litigation_search_rules",
-        "report_drafting_rules",
-        "final_response_rules",
-        "report_template",
-        "final_pdf_tool",
-        "final_response_instruction",
-    ],
+    "description": "First workflow response. Use first_step_name to fetch the first instructions.",
+    "required": ["workflow_name", "steps", "first_step_name", "next_instruction_tool", "next_instruction_call"],
     "properties": {
         "workflow_name": {"type": "string"},
-        "status": {"type": "string", "enum": ["ready", "needs_clarification"]},
+        "steps": {"type": "array", "items": OBJECT},
+        "first_step_name": {"type": "string"},
+        "next_instruction_tool": {"type": "string"},
+        "next_instruction_call": {"type": "string"},
         "known_criteria": OBJECT,
-        "missing_required_field": NULLABLE_STRING,
-        "clarifying_question": NULLABLE_STRING,
-        "next_action": {"type": "string"},
-        "must_follow_rules": STRING_ARRAY,
-        "workflow_steps": STRING_ARRAY,
-        "compumark_trademark_search_rules": STRING_ARRAY,
-        "compumark_litigation_search_rules": STRING_ARRAY,
-        "report_drafting_rules": STRING_ARRAY,
-        "final_response_rules": STRING_ARRAY,
-        "report_template": {"type": "string"},
-        "final_pdf_tool": {"type": "string"},
-        "final_response_instruction": {"type": "string"},
+        "note": {"type": "string"},
     },
+    "additionalProperties": False,
+}
+
+STEP_OUTPUT_SCHEMA = {
+    "type": "object",
+    "description": "Concise instructions for one step, plus the exact next_step_name to request next.",
+    "required": ["step_name", "title", "instructions", "expected_output", "next_step_name", "next_instruction_call", "done"],
+    "properties": {
+        "step_name": {"type": "string"},
+        "title": {"type": "string"},
+        "instructions": {"type": "string"},
+        "expected_output": {"type": "string"},
+        "next_step_name": NULLABLE_STRING,
+        "next_instruction_tool": NULLABLE_STRING,
+        "next_instruction_call": NULLABLE_STRING,
+        "done": {"type": "boolean"},
+    },
+    "additionalProperties": False,
+}
+
+TEMPLATE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["template_markdown", "rules"],
+    "properties": {"template_markdown": {"type": "string"}, "rules": STRING_ARRAY},
     "additionalProperties": False,
 }
 
 PDF_OUTPUT_SCHEMA = {
     "type": "object",
-    "required": ["pdf_path", "pdf_exists", "pdf_size_bytes", "template_validation"],
+    "required": ["pdf_path", "pdf_exists", "pdf_size_bytes"],
     "properties": {
         "pdf_path": {"type": "string"},
         "pdf_url": NULLABLE_STRING,
@@ -954,71 +798,69 @@ PDF_OUTPUT_SCHEMA = {
         "markdown_path": NULLABLE_STRING,
         "markdown_url": NULLABLE_STRING,
         "template_path": {"type": "string"},
-        "template_validation": OBJECT,
         "final_response_instruction": {"type": "string"},
     },
     "additionalProperties": False,
 }
 
 TOOLS: Dict[str, Dict[str, Any]] = {
-    "prepare_trademark_knockout_report": {
-        "description": (
-            "MANDATORY FIRST TOOL for any user request to run, start, prepare, create, or generate a trademark knockout report, "
-            "brand clearance report, trademark clearance search, or brand availability report. Call this before CompuMark searches. "
-            "It returns strict workflow instructions, missing-criteria handling, the exact markdown template, and the requirement to finish by calling "
-            "generate_clarivate_report_pdf. If it returns needs_clarification, ask only the clarifying question and stop. If it returns ready, "
-            "follow all steps and do not give a final user answer until the PDF has been generated."
-        ),
+    "start_trademark_knockout_report": {
+        "description": "Mandatory entrypoint for trademark knockout, brand clearance, clearance search. Returns the first step name and how to fetch its instructions.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "search_criteria": {
                     "type": "object",
-                    "description": "Known values such as mark, jurisdictions/offices, nice_classes, language, type, match_scope, and notes.",
+                    "description": "Known values such as mark, jurisdictions/offices, nice_classes, and web_search_enabled.",
                     "additionalProperties": True,
                 },
-                "criteria": {
-                    "type": "object",
-                    "description": "Alias for search_criteria.",
-                    "additionalProperties": True,
-                },
-                "criteria_json": {"type": "string", "description": "Optional JSON object string with known criteria."},
-                "mark": {"type": "string", "description": "Exact word mark to search."},
-                "jurisdictions": {"type": "string", "description": "Territories or offices, for example EU, UK, US, WO."},
-                "territories": {"type": "string", "description": "Alias for jurisdictions."},
-                "offices": {"type": "string", "description": "Alias for jurisdictions or registration offices."},
-                "registration_offices": {"type": "string", "description": "Alias for jurisdictions or offices."},
-                "nice_classes": {"type": "string", "description": "Nice class numbers, comma-separated if multiple."},
-                "classes": {"type": "string", "description": "Alias for nice_classes."},
-                "nice_class_numbers": {"type": "string", "description": "Alias for nice_classes."},
-                "int_class_numbers": {"type": "string", "description": "Alias for nice_classes."},
-                "language": {"type": "string", "description": "Visible report language. Defaults to the user's language."},
-                "type": {"type": "string", "description": "Word, logo, or both, if known."},
-                "match_scope": {"type": "string", "description": "Exact, contains, phonetic, plurals, etc., if known."},
-                "notes": {"type": "string", "description": "Any limitations, exclusions, or assumptions."},
+                "language": {"type": "string", "description": "Optional visible report language."},
             },
             "additionalProperties": False,
         },
-        "outputSchema": PREPARE_OUTPUT_SCHEMA,
-        "handler": prepare_trademark_knockout_report,
+        "outputSchema": START_OUTPUT_SCHEMA,
+        "handler": start_trademark_knockout_report,
+    },
+    "get_trademark_knockout_step_instructions": {
+        "description": "Get concise instructions for one workflow step. After completing it, call this tool again with next_step_name.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["step_name"],
+            "properties": {
+                "step_name": {
+                    "type": "string",
+                    "enum": STEP_ORDER,
+                    "description": "The step whose instructions are needed.",
+                },
+                "context": {
+                    "type": "object",
+                    "description": "Optional current criteria or evidence. The instructions stay lightweight.",
+                    "additionalProperties": True,
+                },
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": STEP_OUTPUT_SCHEMA,
+        "handler": get_step_instructions,
+    },
+    "get_trademark_knockout_report_template": {
+        "description": "Return the markdown report template to fill before generating the PDF.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "outputSchema": TEMPLATE_OUTPUT_SCHEMA,
+        "handler": get_report_template,
     },
     "generate_clarivate_report_pdf": {
-        "description": (
-            "MANDATORY FINAL TOOL for the trademark knockout workflow. Call this only after the report markdown has been completed using the exact "
-            "template returned by prepare_trademark_knockout_report. This tool validates required headings, rejects unresolved template placeholders, "
-            "checks the exact five-row Top 5 table, and generates the Clarivate-template PDF using assets/Clarivate_template.pdf. The agent must "
-            "finish the user-facing reply with download_the_report or pdf_url when present, or with pdf_path if no public URL is configured. "
-            "Do not provide the final report as plain markdown instead of using this tool, and do not try to change the PDF template."
-        ),
+        "description": "Generate the final PDF using the Clarivate template: template cover, generated report body, template closing page.",
         "inputSchema": {
             "type": "object",
             "required": ["subject"],
             "anyOf": [{"required": ["markdown"]}, {"required": ["markdown_path"]}],
             "properties": {
-                "subject": {"type": "string", "description": "Cover subtitle and searched mark. Required."},
-                "markdown": {"type": "string", "description": "Completed report markdown using the exact required template."},
+                "subject": {"type": "string", "description": "Cover subtitle, normally the searched mark."},
+                "markdown": {"type": "string", "description": "Completed report markdown."},
                 "markdown_path": {"type": "string", "description": "Markdown file path if markdown is omitted."},
                 "output_path": {"type": "string", "description": "Optional PDF output path. Defaults to TRADEMARK_REPORT_OUTPUT_DIR or current directory."},
+                "template_path": {"type": "string", "description": "Optional Clarivate template path."},
                 "save_markdown": {"type": "boolean", "default": True},
                 "markdown_output_path": {"type": "string", "description": "Optional markdown copy output path."},
             },
@@ -1043,13 +885,6 @@ def handle_initialize(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]
             "protocolVersion": protocol,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            "instructions": (
-                "Tools-only POC. For any trademark knockout, clearance, brand availability, or similar report request, "
-                "call prepare_trademark_knockout_report first. Follow all returned rules and workflow steps. If clarification "
-                "is needed, ask only the returned clarifying_question and stop. If ready, use the separate CompuMark tools, "
-                "fill the exact template, then call generate_clarivate_report_pdf. The final user-facing answer must include "
-                "the generated PDF URL/path. Do not use prompts/resources and do not finish with only markdown."
-            ),
         },
     )
 
@@ -1102,20 +937,10 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return handle_tools_list(message_id)
     if method == "tools/call":
         return handle_tools_call(message_id, params)
-
-    # No prompts or resources are exposed in this tools-only POC.
-    # Return empty lists for compatibility with clients that probe these methods.
-    if method == "prompts/list":
-        return json_rpc_result(message_id, {"prompts": []})
     if method == "resources/list":
         return json_rpc_result(message_id, {"resources": []})
-    if method == "resources/templates/list":
-        return json_rpc_result(message_id, {"resourceTemplates": []})
-    if method == "prompts/get":
-        return json_rpc_error(message_id, -32602, "This tools-only POC does not expose MCP prompts. Use prepare_trademark_knockout_report.")
-    if method == "resources/read":
-        return json_rpc_error(message_id, -32602, "This tools-only POC does not expose MCP resources. Use prepare_trademark_knockout_report.")
-
+    if method == "prompts/list":
+        return json_rpc_result(message_id, {"prompts": []})
     return json_rpc_error(message_id, -32601, f"Method not found: {method}")
 
 
@@ -1135,24 +960,16 @@ def run_stdio() -> int:
 
 
 def self_test() -> int:
-    ready = prepare_trademark_knockout_report(
-        {"mark": "NOVALYTIC", "jurisdictions": "EU, UK", "nice_classes": "9, 42", "language": "English"}
-    )
-    missing = prepare_trademark_knockout_report({"mark": "NOVALYTIC", "jurisdictions": "EU, UK"})
-    template_validation = validate_report_markdown(REPORT_TEMPLATE)
-
+    start = start_trademark_knockout_report({"search_criteria": {"mark": "NOVALYTIC", "jurisdictions": ["EU", "UK"], "nice_classes": ["9", "42"]}})
+    first = get_step_instructions({"step_name": start["first_step_name"]})
+    second = get_step_instructions({"step_name": first["next_step_name"]})
     print(
         json.dumps(
             {
-                "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "tools": list(TOOLS.keys()),
-                "ready_status": ready["status"],
-                "ready_next_action": ready["next_action"],
-                "missing_status": missing["status"],
-                "missing_required_field": missing["missing_required_field"],
-                "missing_clarifying_question": missing["clarifying_question"],
-                "template_validation_on_blank_template_should_be_invalid": template_validation,
-                "note": "PDF generation is not run in self-test because it requires assets/Clarivate_template.pdf.",
+                "start": start,
+                "first_step": first,
+                "second_step": second,
             },
             ensure_ascii=False,
             indent=2,
