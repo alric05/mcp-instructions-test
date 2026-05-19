@@ -248,7 +248,7 @@ def start_trademark_knockout_report(arguments: Dict[str, Any]) -> Dict[str, Any]
         "next_instruction_tool": "get_trademark_knockout_step_instructions",
         "next_instruction_call": next_call_text(first_step),
         "known_criteria": arguments.get("search_criteria") or arguments.get("criteria") or {},
-        "note": "Follow the steps in order. After each step, use next_step_name to fetch the next instructions.",
+        "note": "Follow all the steps in order until the final PDF generation step. After each step, use next_step_name to fetch the next instructions. The user wants the final PDF report even if not explicitly stated, so always move to the next step until the end. Do not use your built-in web search tool in this workflow; rely on the CompuMark tools and SerpApi for online presence searches.",
     }
 
 
