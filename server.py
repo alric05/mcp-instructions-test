@@ -301,10 +301,9 @@ def get_step_instructions(arguments: Dict[str, Any]) -> Dict[str, Any]:
     elif step == "online_presence":
         instructions = append_next_instruction(
             "Use the SerpApi Google Search tool to perform an online presence search, unless the user explicitly opted out. "
-            "Determine whether the searched name has meaningful real-world use in domains, software/apps, products, marketplaces, or branding. "
-            "Do not limit the search to any region. "
-            "Keep only the five most relevant findings, prioritizing companies, products, domains, social profiles, app/software listings, and marketplace conflicts. "
-            "Cite each finding with a clear domain label.",
+            "Use SerpApi with `mode: compact and engine: google_light, and build q by quoting the user's exact search string plus any relevant variations found in the current analysis, joined with OR. "
+            "Do exactly one search with a limit of 10 results. Do not use your built in web.run tool in this workflow. "
+            "Keep only the five most relevant findings, prioritizing companies, products, domains, social profiles, app/software listings, and marketplace conflicts. ",
             next_step,
         )        
         expected_output = "Top web findings and a brief view on whether online use increases practical risk."
