@@ -853,12 +853,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Generate the final PDF using the Clarivate template: template cover, generated report body, template closing page.",
         "inputSchema": {
             "type": "object",
-            "required": ["subject"],
-            "anyOf": [{"required": ["markdown"]}, {"required": ["markdown_path"]}],
+            "required": ["subject", "markdown"],
             "properties": {
                 "subject": {"type": "string", "description": "Cover subtitle, normally the searched mark."},
-                "markdown": {"type": "string", "description": "Completed report markdown."},
-                "markdown_path": {"type": "string", "description": "Markdown file path if markdown is omitted."},
+                "markdown": {"type": "string", "description": "Completed report markdown. Required for normal agent use."},
+                "markdown_path": {"type": "string", "description": "Optional markdown file path for direct local/server-side use."},
                 "output_path": {"type": "string", "description": "Optional PDF output path. Defaults to TRADEMARK_REPORT_OUTPUT_DIR or current directory."},
                 "template_path": {"type": "string", "description": "Optional Clarivate template path."},
                 "save_markdown": {"type": "boolean", "default": True},
