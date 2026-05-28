@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Minimal Render-ready MCP HTTP server exposing PDF tools.
+"""Minimal Render-ready MCP HTTP server exposing one PDF tool.
 
 This is a simplified version of the working server.py + http_server.py pattern:
-- flat tool schemas;
+- one flat tool schema;
 - one JSON-RPC /mcp endpoint;
 - one /reports endpoint that serves generated PDFs.
 
@@ -43,7 +43,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 SERVER_NAME = "simple-clarivate-pdf-tool"
@@ -66,7 +66,118 @@ SUBTITLE_BASELINE_Y = 564.91
 SUBTITLE_FONT = "Helvetica-Bold"
 SUBTITLE_FONT_SIZE = 22
 
-LINK_RE = re.compile(r"\[([^\]]+)]\((https?://[^)\s]+)\)")
+ALLOWED_TAGS = {
+    "h1",
+    "h2",
+    "h3",
+    "p",
+    "ul",
+    "ol",
+    "li",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+    "strong",
+    "em",
+    "span",
+    "section",
+    "br",
+    "a",
+}
+RISK_COLORS = {
+    "low": "#1F6F43",
+    "medium": "#8A5A00",
+    "high": "#A61B1B",
+}
+SERVER_DISCLAIMER = (
+    "This report is produced for informational purposes only and does not constitute legal advice. "
+    "Trademark clearance searches are not exhaustive and do not guarantee the availability or registrability of a mark. "
+    "Always consult a qualified trademark attorney before filing."
+)
+SERVER_REPORT_CSS = """
+@page { size: A4; margin: 18mm 16mm; }
+* { box-sizing: border-box; }
+body {
+  font-family: Arial, Helvetica, sans-serif;
+  color: #202124;
+  background: #ffffff;
+  font-size: 11px;
+  line-height: 1.38;
+  margin: 0;
+}
+main.report { width: 100%; }
+h1 {
+  font-size: 23px;
+  line-height: 1.2;
+  margin: 0 0 16px 0;
+  font-weight: 700;
+  color: #202124;
+}
+section {
+  border-top: 1.5px solid #2f5597;
+  padding-top: 10px;
+  margin-top: 18px;
+  break-inside: auto;
+}
+h2 {
+  font-size: 14px;
+  line-height: 1.25;
+  margin: 0 0 8px 0;
+  font-weight: 700;
+  color: #003366;
+}
+h3 {
+  font-size: 12px;
+  line-height: 1.25;
+  margin: 13px 0 6px 0;
+  font-weight: 700;
+  color: #202124;
+}
+p { margin: 0 0 8px 0; }
+ul, ol { margin: 5px 0 10px 0; padding-left: 19px; }
+li { margin: 0 0 4px 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0 12px 0;
+  font-size: 10.5px;
+}
+thead { display: table-header-group; }
+tr { break-inside: avoid; page-break-inside: avoid; }
+th, td {
+  border: 1px solid #d9e2f3;
+  padding: 6.5px 7px;
+  vertical-align: top;
+}
+th { font-weight: 700; text-align: left; }
+table[data-table="kv"] { break-inside: avoid; page-break-inside: avoid; }
+table[data-table="kv"] th {
+  width: 33%;
+  background: #f3f6fb;
+  color: #202124;
+}
+table[data-table="kv"] td { background: #ffffff; }
+table[data-table="data"] thead th {
+  background: #f3f6fb;
+  color: #202124;
+}
+table[data-table="data"] tbody th { background: #f8f9fc; }
+a { color: #003366; text-decoration: none; }
+span[data-risk="low"] { font-weight: 700; color: #1f6f43; }
+span[data-risk="medium"] { font-weight: 700; color: #8a5a00; }
+span[data-risk="high"] { font-weight: 700; color: #a61b1b; }
+.server-disclaimer {
+  margin-top: 22px;
+  padding-top: 8px;
+  border-top: 1px solid #d0d0d0;
+  font-size: 9px;
+  color: #555555;
+  line-height: 1.35;
+}
+""".strip()
 
 
 def output_dir() -> Path:
@@ -95,25 +206,28 @@ def safe_filename(value: str) -> str:
     return name or "report"
 
 
+def safe_report_basename(value: str) -> str:
+    name = safe_filename(value)
+    if name.lower().endswith(".pdf"):
+        name = name[:-4].strip("._-")
+    return name or "report"
+
+
 def timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
-def inline_markup(text: str) -> str:
-    """Convert a small markdown subset to ReportLab paragraph markup."""
-    parts: List[str] = []
-    last = 0
-    for match in LINK_RE.finditer(text):
-        parts.append(html.escape(text[last : match.start()]))
-        label = clean_text(match.group(1))
-        url = match.group(2).strip()
-        parts.append(
-            f'<a href="{html.escape(url, quote=True)}">'
-            f'<font color="#0563C1">{html.escape(label)}</font></a>'
-        )
-        last = match.end()
-    parts.append(html.escape(text[last:]))
-    return re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", "".join(parts))
+def is_safe_href(value: str) -> bool:
+    lowered = value.strip().lower()
+    return lowered.startswith("https://") or lowered.startswith("http://") or lowered.startswith("mailto:")
+
+
+def valid_span(value: Optional[str], default: str = "1") -> str:
+    try:
+        number = int(str(value or default))
+    except ValueError:
+        number = int(default)
+    return str(max(1, min(number, 20)))
 
 
 def build_styles() -> Dict[str, ParagraphStyle]:
@@ -123,21 +237,21 @@ def build_styles() -> Dict[str, ParagraphStyle]:
             "ReportTitle",
             parent=base["Title"],
             fontName="Helvetica-Bold",
-            fontSize=18,
-            leading=22,
+            fontSize=23,
+            leading=27,
             alignment=TA_LEFT,
-            textColor=colors.HexColor("#222222"),
-            spaceAfter=8,
+            textColor=colors.HexColor("#202124"),
+            spaceAfter=16,
         ),
         "h1": ParagraphStyle(
             "ReportHeading1",
             parent=base["Heading1"],
             fontName="Helvetica-Bold",
             fontSize=14,
-            leading=18,
-            textColor=colors.HexColor("#222222"),
-            spaceBefore=8,
-            spaceAfter=6,
+            leading=17.5,
+            textColor=colors.HexColor("#003366"),
+            spaceBefore=0,
+            spaceAfter=8,
         ),
         "h2": ParagraphStyle(
             "ReportHeading2",
@@ -145,267 +259,385 @@ def build_styles() -> Dict[str, ParagraphStyle]:
             fontName="Helvetica-Bold",
             fontSize=12,
             leading=15,
-            textColor=colors.HexColor("#222222"),
-            spaceBefore=6,
-            spaceAfter=4,
+            textColor=colors.HexColor("#202124"),
+            spaceBefore=7,
+            spaceAfter=6,
         ),
         "body": ParagraphStyle(
             "ReportBody",
             parent=base["BodyText"],
             fontName="Helvetica",
-            fontSize=9,
-            leading=12,
-            textColor=colors.HexColor("#222222"),
-            spaceAfter=4,
+            fontSize=11,
+            leading=15.2,
+            textColor=colors.HexColor("#202124"),
+            spaceAfter=8,
         ),
         "bullet": ParagraphStyle(
             "ReportBullet",
             parent=base["BodyText"],
             fontName="Helvetica",
-            fontSize=9,
-            leading=12,
+            fontSize=11,
+            leading=15.2,
             leftIndent=12,
             firstLineIndent=-8,
-            spaceAfter=3,
+            spaceAfter=4,
         ),
         "cell": ParagraphStyle(
             "ReportCell",
             parent=base["BodyText"],
             fontName="Helvetica",
-            fontSize=8,
-            leading=10,
-            textColor=colors.HexColor("#222222"),
+            fontSize=10.5,
+            leading=14.5,
+            textColor=colors.HexColor("#202124"),
             spaceAfter=0,
         ),
         "cell_label": ParagraphStyle(
             "ReportCellLabel",
             parent=base["BodyText"],
             fontName="Helvetica-Bold",
-            fontSize=8,
-            leading=10,
-            textColor=colors.HexColor("#222222"),
+            fontSize=10.5,
+            leading=14.5,
+            textColor=colors.HexColor("#202124"),
             spaceAfter=0,
+        ),
+        "disclaimer": ParagraphStyle(
+            "ServerDisclaimer",
+            parent=base["BodyText"],
+            fontName="Helvetica",
+            fontSize=9,
+            leading=12.2,
+            textColor=colors.HexColor("#555555"),
+            spaceBefore=6,
         ),
     }
 
+class HTMLFragmentSanitizer(HTMLParser):
+    """Sanitize the agent's body fragment to a strict, report-safe subset."""
 
-def markdown_to_flowables(markdown_text: str) -> List[Any]:
-    styles = build_styles()
-    flowables: List[Any] = []
-    for raw_line in markdown_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line in {"---", "***", "___"}:
-            flowables.append(Spacer(1, 6))
-        elif line.startswith("# "):
-            flowables.append(Paragraph(inline_markup(line[2:].strip()), styles["title"]))
-        elif line.startswith("## "):
-            flowables.append(Paragraph(inline_markup(line[3:].strip()), styles["h1"]))
-        elif line.startswith("### "):
-            flowables.append(Paragraph(inline_markup(line[4:].strip()), styles["h2"]))
-        elif line.startswith("- ") or line.startswith("* "):
-            flowables.append(Paragraph("- " + inline_markup(line[2:].strip()), styles["bullet"]))
-        else:
-            flowables.append(Paragraph(inline_markup(line), styles["body"]))
-    return flowables or [Paragraph("No report content provided.", styles["body"])]
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.output: List[str] = []
+        self.skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style", "head"}:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if tag in {"html", "body"}:
+            return
+        if tag not in ALLOWED_TAGS:
+            return
+        if tag == "br":
+            self.output.append("<br/>")
+            return
+
+        clean_attrs = self._clean_attrs(tag, attrs)
+        attr_text = "".join(f' {name}="{html.escape(value, quote=True)}"' for name, value in clean_attrs)
+        self.output.append(f"<{tag}{attr_text}>")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style", "head"} and self.skip_depth:
+            self.skip_depth -= 1
+            return
+        if self.skip_depth:
+            return
+        if tag in {"html", "body", "br"}:
+            return
+        if tag in ALLOWED_TAGS:
+            self.output.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self.skip_depth:
+            self.output.append(html.escape(data))
+
+    def _clean_attrs(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> List[tuple[str, str]]:
+        raw = {name.lower(): value for name, value in attrs if name and value is not None}
+        cleaned: List[tuple[str, str]] = []
+        if tag == "table" and raw.get("data-table") in {"kv", "data"}:
+            cleaned.append(("data-table", raw["data-table"]))
+        elif tag == "span" and raw.get("data-risk") in RISK_COLORS:
+            cleaned.append(("data-risk", raw["data-risk"]))
+        elif tag in {"th", "td"}:
+            if "colspan" in raw:
+                cleaned.append(("colspan", valid_span(raw["colspan"])))
+            if "rowspan" in raw:
+                cleaned.append(("rowspan", valid_span(raw["rowspan"])))
+            if tag == "th" and raw.get("scope") in {"row", "col", "rowgroup", "colgroup"}:
+                cleaned.append(("scope", raw["scope"]))
+        elif tag == "a" and raw.get("href") and is_safe_href(raw["href"]):
+            cleaned.append(("href", raw["href"].strip()))
+        return cleaned
+
+    def sanitized(self) -> str:
+        return "".join(self.output)
 
 
-def build_body_pdf(markdown_text: str, output_path: Path) -> None:
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=A4,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
-        title="Clarivate Report",
-        author="Example MCP server",
-    )
-    doc.build(markdown_to_flowables(markdown_text))
-
-
-class SimpleReportHTMLParser(HTMLParser):
-    """Extract a small report-friendly subset of HTML into renderable nodes."""
+class ReportHTMLParser(HTMLParser):
+    """Extract sanitized report HTML into ReportLab-friendly render nodes."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.nodes: List[Any] = []
-        self.style_depth = 0
         self.current_block: Optional[Dict[str, Any]] = None
-        self.current_table: Optional[List[List[str]]] = None
-        self.current_row: Optional[List[str]] = None
-        self.current_cell: Optional[List[str]] = None
-        self.current_link_href: Optional[str] = None
+        self.current_table: Optional[Dict[str, Any]] = None
+        self.current_row: Optional[Dict[str, Any]] = None
+        self.current_cell: Optional[Dict[str, Any]] = None
+        self.in_thead = False
+        self.list_stack: List[Dict[str, Any]] = []
+        self.span_risk_stack: List[bool] = []
+        self.link_stack: List[bool] = []
 
     def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
         tag = tag.lower()
-        if tag == "style":
-            self.style_depth += 1
-            return
-        if self.style_depth:
-            return
-        if tag == "br":
-            self._append_text("\n")
-            return
-        if tag == "a":
-            self.current_link_href = dict(attrs).get("href")
-            return
-        if tag == "table":
+        attr = {name.lower(): value for name, value in attrs if name and value is not None}
+        if tag == "section":
             self._finish_block()
-            self.current_table = []
-            return
-        if tag == "tr" and self.current_table is not None:
-            self.current_row = []
-            return
-        if tag in {"td", "th"} and self.current_row is not None:
-            self.current_cell = []
-            return
-        if tag in {"h1", "h2", "h3"}:
+            self.nodes.append(("section_start",))
+        elif tag in {"h1", "h2", "h3"}:
             self._finish_block()
             self.current_block = {"kind": "heading", "level": int(tag[1]), "parts": []}
-            return
-        if tag == "p":
+        elif tag == "p":
             self._finish_block()
             self.current_block = {"kind": "paragraph", "parts": []}
-            return
-        if tag == "li":
+        elif tag in {"ul", "ol"}:
+            self.list_stack.append({"tag": tag, "count": 0})
+        elif tag == "li":
             self._finish_block()
-            self.current_block = {"kind": "bullet", "parts": []}
-
-    def handle_data(self, data: str) -> None:
-        if self.style_depth:
-            return
-        self._append_text(data)
+            prefix = "-"
+            if self.list_stack and self.list_stack[-1]["tag"] == "ol":
+                self.list_stack[-1]["count"] += 1
+                prefix = f"{self.list_stack[-1]['count']}."
+            self.current_block = {"kind": "bullet", "prefix": prefix, "parts": []}
+        elif tag == "table":
+            self._finish_block()
+            self.current_table = {"type": attr.get("data-table") or "data", "rows": []}
+        elif tag == "thead":
+            self.in_thead = True
+        elif tag == "tbody":
+            self.in_thead = False
+        elif tag == "tr" and self.current_table is not None:
+            self.current_row = {"is_header": self.in_thead, "cells": []}
+        elif tag in {"th", "td"} and self.current_row is not None:
+            self.current_cell = {
+                "tag": tag,
+                "parts": [],
+                "colspan": int(attr.get("colspan", "1")),
+                "rowspan": int(attr.get("rowspan", "1")),
+            }
+        elif tag == "strong":
+            self._append_markup("<b>")
+        elif tag == "em":
+            self._append_markup("<i>")
+        elif tag == "span":
+            risk = attr.get("data-risk")
+            if risk in RISK_COLORS:
+                self._append_markup(f'<font color="{RISK_COLORS[risk]}"><b>')
+                self.span_risk_stack.append(True)
+            else:
+                self.span_risk_stack.append(False)
+        elif tag == "a":
+            href = attr.get("href")
+            if href and is_safe_href(href):
+                escaped = html.escape(href, quote=True)
+                self._append_markup(f'<a href="{escaped}"><font color="#003366">')
+                self.link_stack.append(True)
+            else:
+                self.link_stack.append(False)
+        elif tag == "br":
+            self._append_markup("<br/>")
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        if tag == "style" and self.style_depth:
-            self.style_depth -= 1
-            return
-        if self.style_depth:
-            return
-        if tag == "a":
-            self.current_link_href = None
-            return
-        if tag in {"td", "th"} and self.current_cell is not None and self.current_row is not None:
-            self.current_row.append(clean_text("".join(self.current_cell)))
-            self.current_cell = None
-            return
-        if tag == "tr" and self.current_row is not None and self.current_table is not None:
-            if any(cell.strip() for cell in self.current_row):
-                self.current_table.append(self.current_row)
-            self.current_row = None
-            return
-        if tag == "table" and self.current_table is not None:
-            if self.current_table:
-                self.nodes.append(("table", self.current_table))
-            self.current_table = None
-            return
         if tag in {"h1", "h2", "h3", "p", "li"}:
             self._finish_block()
+        elif tag in {"ul", "ol"} and self.list_stack:
+            self.list_stack.pop()
+        elif tag == "thead":
+            self.in_thead = False
+        elif tag in {"th", "td"} and self.current_cell is not None and self.current_row is not None:
+            self.current_row["cells"].append(self.current_cell)
+            self.current_cell = None
+        elif tag == "tr" and self.current_row is not None and self.current_table is not None:
+            if any("".join(cell["parts"]).strip() for cell in self.current_row["cells"]):
+                if all(cell["tag"] == "th" for cell in self.current_row["cells"]):
+                    self.current_row["is_header"] = True
+                self.current_table["rows"].append(self.current_row)
+            self.current_row = None
+        elif tag == "table" and self.current_table is not None:
+            if self.current_table["rows"]:
+                self.nodes.append(("table", self.current_table))
+            self.current_table = None
+        elif tag == "strong":
+            self._append_markup("</b>")
+        elif tag == "em":
+            self._append_markup("</i>")
+        elif tag == "span":
+            if self.span_risk_stack and self.span_risk_stack.pop():
+                self._append_markup("</b></font>")
+        elif tag == "a":
+            if self.link_stack and self.link_stack.pop():
+                self._append_markup("</font></a>")
+
+    def handle_data(self, data: str) -> None:
+        self._append_markup(html.escape(data))
 
     def close(self) -> None:
         self._finish_block()
         super().close()
 
-    def _append_text(self, value: str) -> None:
-        if not value:
-            return
-        text = value
-        if self.current_link_href and value.strip():
-            text = f"{value} ({self.current_link_href})"
+    def _append_markup(self, value: str) -> None:
         if self.current_cell is not None:
-            self.current_cell.append(text)
+            self.current_cell["parts"].append(value)
         elif self.current_block is not None:
-            self.current_block["parts"].append(text)
+            self.current_block["parts"].append(value)
 
     def _finish_block(self) -> None:
         if not self.current_block:
             return
-        text = clean_text("".join(self.current_block["parts"]))
-        if text:
+        markup = "".join(self.current_block["parts"]).strip()
+        if markup:
             if self.current_block["kind"] == "heading":
-                self.nodes.append(("heading", self.current_block["level"], text))
+                self.nodes.append(("heading", self.current_block["level"], markup))
             elif self.current_block["kind"] == "bullet":
-                self.nodes.append(("bullet", text))
+                self.nodes.append(("bullet", self.current_block["prefix"], markup))
             else:
-                self.nodes.append(("paragraph", text))
+                self.nodes.append(("paragraph", markup))
         self.current_block = None
 
 
-def html_table_flowable(rows: List[List[str]], styles: Dict[str, ParagraphStyle]) -> Table:
-    max_cols = max(len(row) for row in rows)
-    normalized_rows = [row + [""] * (max_cols - len(row)) for row in rows]
+def sanitize_html_fragment(fragment: str) -> str:
+    parser = HTMLFragmentSanitizer()
+    parser.feed(fragment)
+    parser.close()
+    return parser.sanitized()
 
+
+def wrap_html_document(document_title: str, sanitized_fragment: str) -> str:
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(document_title)}</title>
+  <style>
+{SERVER_REPORT_CSS}
+  </style>
+</head>
+<body>
+  <main class="report">
+    {sanitized_fragment}
+  </main>
+
+  <div class="server-disclaimer">
+    {html.escape(SERVER_DISCLAIMER)}
+  </div>
+</body>
+</html>"""
+
+
+def html_table_flowable(table_node: Dict[str, Any], styles: Dict[str, ParagraphStyle]) -> Table:
+    rows = table_node["rows"]
+    table_type = table_node["type"] if table_node["type"] in {"kv", "data"} else "data"
+    max_cols = max(sum(cell["colspan"] for cell in row["cells"]) for row in rows)
     data = []
-    for row in normalized_rows:
-        data.append(
-            [
-                Paragraph(inline_markup(cell), styles["cell_label" if col_index == 0 else "cell"])
-                for col_index, cell in enumerate(row)
-            ]
-        )
+    span_commands = []
 
-    available_width = A4[0] - 36 * mm
-    if max_cols == 2:
+    for row_index, row in enumerate(rows):
+        rendered_row = []
+        col_index = 0
+        for cell in row["cells"]:
+            style_name = "cell_label" if cell["tag"] == "th" or (table_type == "kv" and col_index == 0) else "cell"
+            rendered_row.append(Paragraph("".join(cell["parts"]).strip(), styles[style_name]))
+            colspan = max(1, int(cell["colspan"]))
+            if colspan > 1:
+                span_commands.append(("SPAN", (col_index, row_index), (col_index + colspan - 1, row_index)))
+                for _ in range(colspan - 1):
+                    rendered_row.append("")
+            col_index += colspan
+        rendered_row.extend([""] * (max_cols - len(rendered_row)))
+        data.append(rendered_row)
+
+    available_width = A4[0] - 32 * mm
+    if table_type == "kv" and max_cols == 2:
         col_widths = [available_width * 0.33, available_width * 0.67]
     else:
         col_widths = [available_width / max_cols] * max_cols
 
-    table = Table(data, colWidths=col_widths, repeatRows=0, hAlign="LEFT")
+    table = Table(data, colWidths=col_widths, repeatRows=1 if rows and rows[0]["is_header"] else 0, hAlign="LEFT")
     commands = [
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9E2F3")),
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F2F5FB")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 6.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6.5),
     ]
-    table.setStyle(TableStyle(commands))
+    if table_type == "kv":
+        commands.append(("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F3F6FB")))
+    else:
+        for row_index, row in enumerate(rows):
+            if row["is_header"]:
+                commands.append(("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor("#F3F6FB")))
+            for col_index, cell in enumerate(row["cells"]):
+                if cell["tag"] == "th" and not row["is_header"]:
+                    commands.append(("BACKGROUND", (col_index, row_index), (col_index, row_index), colors.HexColor("#F8F9FC")))
+    table.setStyle(TableStyle(commands + span_commands))
     return table
 
 
-def html_to_flowables(html_text: str) -> List[Any]:
-    parser = SimpleReportHTMLParser()
-    parser.feed(html_text)
+def html_fragment_to_flowables(html_fragment: str, document_title: str) -> List[Any]:
+    sanitized_fragment = sanitize_html_fragment(html_fragment)
+    # Keep the complete server-side document available as the canonical render input.
+    # The ReportLab renderer consumes the sanitized semantic fragment and mirrors the fixed CSS below.
+    _server_owned_html_document = wrap_html_document(document_title, sanitized_fragment)
+
+    parser = ReportHTMLParser()
+    parser.feed(sanitized_fragment)
     parser.close()
 
     styles = build_styles()
     flowables: List[Any] = []
     for node in parser.nodes:
         kind = node[0]
-        if kind == "heading":
-            _, level, text = node
+        if kind == "section_start":
+            flowables.append(Spacer(1, 10))
+            flowables.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2F5597"), spaceAfter=8))
+        elif kind == "heading":
+            _, level, markup = node
             style_name = "title" if level == 1 else "h1" if level == 2 else "h2"
-            flowables.append(Paragraph(inline_markup(text), styles[style_name]))
+            flowables.append(Paragraph(markup, styles[style_name]))
         elif kind == "paragraph":
-            _, text = node
-            flowables.append(Paragraph(inline_markup(text), styles["body"]))
+            _, markup = node
+            flowables.append(Paragraph(markup, styles["body"]))
         elif kind == "bullet":
-            _, text = node
-            flowables.append(Paragraph("- " + inline_markup(text), styles["bullet"]))
+            _, prefix, markup = node
+            flowables.append(Paragraph(f"{prefix} {markup}", styles["bullet"]))
         elif kind == "table":
-            _, rows = node
-            flowables.append(html_table_flowable(rows, styles))
-            flowables.append(Spacer(1, 8))
+            _, table_node = node
+            flowables.append(html_table_flowable(table_node, styles))
+            flowables.append(Spacer(1, 12))
 
+    flowables.append(Spacer(1, 22))
+    flowables.append(HRFlowable(width="100%", thickness=0.75, color=colors.HexColor("#D0D0D0"), spaceAfter=8))
+    flowables.append(Paragraph(html.escape(SERVER_DISCLAIMER), styles["disclaimer"]))
     return flowables or [Paragraph("No report content provided.", styles["body"])]
 
 
-def build_html_body_pdf(html_text: str, output_path: Path) -> None:
+def build_html_body_pdf(html_fragment: str, document_title: str, output_path: Path) -> None:
     doc = SimpleDocTemplate(
         str(output_path),
         pagesize=A4,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
+        leftMargin=16 * mm,
+        rightMargin=16 * mm,
         topMargin=18 * mm,
         bottomMargin=18 * mm,
-        title="Clarivate Report",
+        title=clean_text(document_title) or "Clarivate Report",
         author="Example MCP server",
     )
-    doc.build(html_to_flowables(html_text))
+    doc.build(html_fragment_to_flowables(html_fragment, document_title))
 
 
 def build_cover_overlay(subject: str, output_path: Path) -> None:
@@ -442,66 +674,43 @@ def merge_with_template(body_path: Path, overlay_path: Path, output_path: Path) 
         writer.write(handle)
 
 
+def build_report_pdf(
+    document_title: str,
+    file_name: str,
+    html_fragment: str,
+) -> Dict[str, Any]:
+    output_path = output_dir() / f"{file_name}_{timestamp()}.pdf"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        body_pdf = tmpdir / "body.pdf"
+        overlay_pdf = tmpdir / "cover_overlay.pdf"
+        build_html_body_pdf(html_fragment, document_title, body_pdf)
+        build_cover_overlay(document_title, overlay_pdf)
+        merge_with_template(body_pdf, overlay_pdf, output_path)
+
+    return {
+        "pdf_url": public_report_url(output_path),
+        "download_the_report": public_report_url(output_path),
+        "pdf_path": str(output_path.resolve()),
+        "pdf_exists": output_path.exists(),
+        "pdf_size_bytes": output_path.stat().st_size if output_path.exists() else 0,
+        "template_path": str(TEMPLATE_PATH.resolve()),
+    }
+
+
 def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    subject = clean_text(arguments.get("subject"))
-    markdown = str(arguments.get("markdown") or "").strip()
-    filename = safe_filename(str(arguments.get("filename") or "report"))
+    html_fragment = str(arguments.get("htmlFragment") or "").strip()
+    file_name = safe_report_basename(str(arguments.get("fileName") or "report"))
+    document_title = clean_text(arguments.get("documentTitle") or "Clarivate Report")
 
-    if not subject:
-        raise ValueError("subject is required.")
-    if not markdown:
-        raise ValueError("markdown is required.")
-    if not filename:
-        raise ValueError("filename is required.")
+    if not html_fragment:
+        raise ValueError("htmlFragment is required.")
+    if not file_name:
+        raise ValueError("fileName is required.")
+    if not document_title:
+        raise ValueError("documentTitle is required.")
 
-    output_path = output_dir() / f"{filename}_{timestamp()}.pdf"
-    with tempfile.TemporaryDirectory() as tmp:
-        tmpdir = Path(tmp)
-        body_pdf = tmpdir / "body.pdf"
-        overlay_pdf = tmpdir / "cover_overlay.pdf"
-        build_body_pdf(markdown, body_pdf)
-        build_cover_overlay(subject, overlay_pdf)
-        merge_with_template(body_pdf, overlay_pdf, output_path)
-
-    return {
-        "pdf_url": public_report_url(output_path),
-        "download_the_report": public_report_url(output_path),
-        "pdf_path": str(output_path.resolve()),
-        "pdf_exists": output_path.exists(),
-        "pdf_size_bytes": output_path.stat().st_size if output_path.exists() else 0,
-        "template_path": str(TEMPLATE_PATH.resolve()),
-    }
-
-
-def generate_clarivate_report_pdf_from_html(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    subject = clean_text(arguments.get("subject"))
-    html_text = str(arguments.get("html") or "").strip()
-    filename = safe_filename(str(arguments.get("filename") or "report"))
-
-    if not subject:
-        raise ValueError("subject is required.")
-    if not html_text:
-        raise ValueError("html is required.")
-    if not filename:
-        raise ValueError("filename is required.")
-
-    output_path = output_dir() / f"{filename}_{timestamp()}.pdf"
-    with tempfile.TemporaryDirectory() as tmp:
-        tmpdir = Path(tmp)
-        body_pdf = tmpdir / "body.pdf"
-        overlay_pdf = tmpdir / "cover_overlay.pdf"
-        build_html_body_pdf(html_text, body_pdf)
-        build_cover_overlay(subject, overlay_pdf)
-        merge_with_template(body_pdf, overlay_pdf, output_path)
-
-    return {
-        "pdf_url": public_report_url(output_path),
-        "download_the_report": public_report_url(output_path),
-        "pdf_path": str(output_path.resolve()),
-        "pdf_exists": output_path.exists(),
-        "pdf_size_bytes": output_path.stat().st_size if output_path.exists() else 0,
-        "template_path": str(TEMPLATE_PATH.resolve()),
-    }
+    return build_report_pdf(document_title, file_name, html_fragment)
 
 
 def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
@@ -539,37 +748,40 @@ PDF_OUTPUT_SCHEMA = {
 
 TOOLS: Dict[str, Dict[str, Any]] = {
     "generate_clarivate_report_pdf": {
-        "description": "Generate a Clarivate-template PDF from a subject, markdown report body, and filename.",
+        "description": (
+            "Generate a Clarivate-template PDF from a compact, semantic HTML body fragment. "
+            "Send report content only: no full HTML document, CSS, inline styles, scripts, or Markdown tables. "
+            "The server sanitizes the fragment, applies fixed sober business-report styling, adds the disclaimer, "
+            "wraps the body, creates the PDF, and returns a downloadable PDF link."
+        ),
         "inputSchema": {
             "type": "object",
-            "required": ["subject", "markdown", "filename"],
+            "required": ["htmlFragment", "fileName", "documentTitle"],
             "properties": {
-                "subject": {"type": "string", "description": "Cover subtitle, usually the searched mark or report subject."},
-                "markdown": {"type": "string", "description": "Completed markdown report body."},
-                "filename": {"type": "string", "description": "Base report filename without directories. A timestamp is appended."},
+                "htmlFragment": {
+                    "type": "string",
+                    "description": (
+                        "Report body fragment only; the server sanitizes it before PDF generation. Allowed tags include h1, h2, h3, p, ul, ol, li, "
+                        "section, table, thead, tbody, tr, th, td, strong, em, span, br, and a. "
+                        "Use table data-table='kv' for key/value tables, table data-table='data' for data tables, "
+                        "span data-risk='low|medium|high' for risk labels, th/td colspan or rowspan for simple spans, "
+                        "optional th scope, and a href with http, https, or mailto links only. Do not include html/head/body/style/script, CSS, "
+                        "inline style attributes, event handlers, or Markdown tables."
+                    ),
+                },
+                "fileName": {
+                    "type": "string",
+                    "description": "Base PDF filename, for example trademark-knockout-report.pdf. Directories are ignored and a timestamp is appended.",
+                },
+                "documentTitle": {
+                    "type": "string",
+                    "description": "Document title used for the PDF metadata and Clarivate cover subtitle.",
+                },
             },
             "additionalProperties": False,
         },
         "outputSchema": PDF_OUTPUT_SCHEMA,
         "handler": generate_clarivate_report_pdf,
-    },
-    "generate_clarivate_report_pdf_from_html": {
-        "description": "Generate a Clarivate-template PDF from a subject, HTML report body, and filename.",
-        "inputSchema": {
-            "type": "object",
-            "required": ["subject", "html", "filename"],
-            "properties": {
-                "subject": {"type": "string", "description": "Cover subtitle, usually the searched mark or report subject."},
-                "html": {
-                    "type": "string",
-                    "description": "Completed HTML report body. Supports headings, paragraphs, lists, and simple tables.",
-                },
-                "filename": {"type": "string", "description": "Base report filename without directories. A timestamp is appended."},
-            },
-            "additionalProperties": False,
-        },
-        "outputSchema": PDF_OUTPUT_SCHEMA,
-        "handler": generate_clarivate_report_pdf_from_html,
     }
 }
 
@@ -768,29 +980,30 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
 
 
 def self_test() -> int:
-    markdown_result = generate_clarivate_report_pdf(
+    result = generate_clarivate_report_pdf(
         {
-            "subject": "EXAMPLE",
-            "markdown": "# Example Report\n\nThis is a simplified PDF tool test.",
-            "filename": "example_report",
-        }
-    )
-    html_result = generate_clarivate_report_pdf_from_html(
-        {
-            "subject": "POWER BULA",
-            "html": (
-                "<style>.section{font-family:Arial}</style>"
-                "<div class='section'><h2>1. Search Criteria</h2><table class='kv'>"
-                "<tr><td>Mark searched</td><td>Power Bula</td></tr>"
-                "<tr><td>Type</td><td>Word</td></tr>"
-                "<tr><td>Territories covered</td><td>Philippines (PH)</td></tr>"
-                "<tr><td>Nice classes</td><td>3</td></tr>"
-                "</table></div>"
+            "documentTitle": "Trademark Knockout Search Report",
+            "fileName": "trademark-knockout-report.pdf",
+            "htmlFragment": (
+                "<h1>Trademark Knockout Search Report</h1>"
+                "<section><h2>1. Search Criteria</h2><table data-table='kv'><tbody>"
+                "<tr><th>Mark searched</th><td>POWER BULA</td></tr>"
+                "<tr><th>Type</th><td>Word</td></tr>"
+                "<tr><th>Territories covered</th><td>Philippines (PH), WIPO designations in PH</td></tr>"
+                "<tr><th>Nice classes</th><td>3</td></tr>"
+                "</tbody></table></section>"
+                "<section><h2>2. Risk Summary</h2><table data-table='kv'><tbody>"
+                "<tr><th>Exact match found</th><td>Yes</td></tr>"
+                "<tr><th>Initial risk</th><td><span data-risk='high'>High</span></td></tr>"
+                "</tbody></table></section>"
+                "<section><h2>3. Key Takeaways</h2><ul>"
+                "<li>Exact or near-identical use was identified in the searched class.</li>"
+                "<li>Proceed with caution and obtain legal review before filing.</li>"
+                "</ul></section>"
             ),
-            "filename": "html_report",
         }
     )
-    print(json.dumps({"tools": list(TOOLS.keys()), "markdown_result": markdown_result, "html_result": html_result}, indent=2))
+    print(json.dumps({"tools": list(TOOLS.keys()), "result": result}, indent=2))
     return 0
 
 
