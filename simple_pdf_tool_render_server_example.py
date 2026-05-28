@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Minimal Render-ready MCP HTTP server exposing one PDF tool.
+"""Minimal Render-ready MCP HTTP server exposing PDF tools.
 
 This is a simplified version of the working server.py + http_server.py pattern:
-- one flat tool schema;
+- flat tool schemas;
 - one JSON-RPC /mcp endpoint;
 - one /reports endpoint that serves generated PDFs.
 
@@ -32,6 +32,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -42,7 +43,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 SERVER_NAME = "simple-clarivate-pdf-tool"
@@ -167,6 +168,24 @@ def build_styles() -> Dict[str, ParagraphStyle]:
             firstLineIndent=-8,
             spaceAfter=3,
         ),
+        "cell": ParagraphStyle(
+            "ReportCell",
+            parent=base["BodyText"],
+            fontName="Helvetica",
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#222222"),
+            spaceAfter=0,
+        ),
+        "cell_label": ParagraphStyle(
+            "ReportCellLabel",
+            parent=base["BodyText"],
+            fontName="Helvetica-Bold",
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#222222"),
+            spaceAfter=0,
+        ),
     }
 
 
@@ -204,6 +223,189 @@ def build_body_pdf(markdown_text: str, output_path: Path) -> None:
         author="Example MCP server",
     )
     doc.build(markdown_to_flowables(markdown_text))
+
+
+class SimpleReportHTMLParser(HTMLParser):
+    """Extract a small report-friendly subset of HTML into renderable nodes."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.nodes: List[Any] = []
+        self.style_depth = 0
+        self.current_block: Optional[Dict[str, Any]] = None
+        self.current_table: Optional[List[List[str]]] = None
+        self.current_row: Optional[List[str]] = None
+        self.current_cell: Optional[List[str]] = None
+        self.current_link_href: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        if tag == "style":
+            self.style_depth += 1
+            return
+        if self.style_depth:
+            return
+        if tag == "br":
+            self._append_text("\n")
+            return
+        if tag == "a":
+            self.current_link_href = dict(attrs).get("href")
+            return
+        if tag == "table":
+            self._finish_block()
+            self.current_table = []
+            return
+        if tag == "tr" and self.current_table is not None:
+            self.current_row = []
+            return
+        if tag in {"td", "th"} and self.current_row is not None:
+            self.current_cell = []
+            return
+        if tag in {"h1", "h2", "h3"}:
+            self._finish_block()
+            self.current_block = {"kind": "heading", "level": int(tag[1]), "parts": []}
+            return
+        if tag == "p":
+            self._finish_block()
+            self.current_block = {"kind": "paragraph", "parts": []}
+            return
+        if tag == "li":
+            self._finish_block()
+            self.current_block = {"kind": "bullet", "parts": []}
+
+    def handle_data(self, data: str) -> None:
+        if self.style_depth:
+            return
+        self._append_text(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "style" and self.style_depth:
+            self.style_depth -= 1
+            return
+        if self.style_depth:
+            return
+        if tag == "a":
+            self.current_link_href = None
+            return
+        if tag in {"td", "th"} and self.current_cell is not None and self.current_row is not None:
+            self.current_row.append(clean_text("".join(self.current_cell)))
+            self.current_cell = None
+            return
+        if tag == "tr" and self.current_row is not None and self.current_table is not None:
+            if any(cell.strip() for cell in self.current_row):
+                self.current_table.append(self.current_row)
+            self.current_row = None
+            return
+        if tag == "table" and self.current_table is not None:
+            if self.current_table:
+                self.nodes.append(("table", self.current_table))
+            self.current_table = None
+            return
+        if tag in {"h1", "h2", "h3", "p", "li"}:
+            self._finish_block()
+
+    def close(self) -> None:
+        self._finish_block()
+        super().close()
+
+    def _append_text(self, value: str) -> None:
+        if not value:
+            return
+        text = value
+        if self.current_link_href and value.strip():
+            text = f"{value} ({self.current_link_href})"
+        if self.current_cell is not None:
+            self.current_cell.append(text)
+        elif self.current_block is not None:
+            self.current_block["parts"].append(text)
+
+    def _finish_block(self) -> None:
+        if not self.current_block:
+            return
+        text = clean_text("".join(self.current_block["parts"]))
+        if text:
+            if self.current_block["kind"] == "heading":
+                self.nodes.append(("heading", self.current_block["level"], text))
+            elif self.current_block["kind"] == "bullet":
+                self.nodes.append(("bullet", text))
+            else:
+                self.nodes.append(("paragraph", text))
+        self.current_block = None
+
+
+def html_table_flowable(rows: List[List[str]], styles: Dict[str, ParagraphStyle]) -> Table:
+    max_cols = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (max_cols - len(row)) for row in rows]
+
+    data = []
+    for row in normalized_rows:
+        data.append(
+            [
+                Paragraph(inline_markup(cell), styles["cell_label" if col_index == 0 else "cell"])
+                for col_index, cell in enumerate(row)
+            ]
+        )
+
+    available_width = A4[0] - 36 * mm
+    if max_cols == 2:
+        col_widths = [available_width * 0.33, available_width * 0.67]
+    else:
+        col_widths = [available_width / max_cols] * max_cols
+
+    table = Table(data, colWidths=col_widths, repeatRows=0, hAlign="LEFT")
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9E2F3")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F2F5FB")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def html_to_flowables(html_text: str) -> List[Any]:
+    parser = SimpleReportHTMLParser()
+    parser.feed(html_text)
+    parser.close()
+
+    styles = build_styles()
+    flowables: List[Any] = []
+    for node in parser.nodes:
+        kind = node[0]
+        if kind == "heading":
+            _, level, text = node
+            style_name = "title" if level == 1 else "h1" if level == 2 else "h2"
+            flowables.append(Paragraph(inline_markup(text), styles[style_name]))
+        elif kind == "paragraph":
+            _, text = node
+            flowables.append(Paragraph(inline_markup(text), styles["body"]))
+        elif kind == "bullet":
+            _, text = node
+            flowables.append(Paragraph("- " + inline_markup(text), styles["bullet"]))
+        elif kind == "table":
+            _, rows = node
+            flowables.append(html_table_flowable(rows, styles))
+            flowables.append(Spacer(1, 8))
+
+    return flowables or [Paragraph("No report content provided.", styles["body"])]
+
+
+def build_html_body_pdf(html_text: str, output_path: Path) -> None:
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title="Clarivate Report",
+        author="Example MCP server",
+    )
+    doc.build(html_to_flowables(html_text))
 
 
 def build_cover_overlay(subject: str, output_path: Path) -> None:
@@ -271,6 +473,37 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def generate_clarivate_report_pdf_from_html(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    subject = clean_text(arguments.get("subject"))
+    html_text = str(arguments.get("html") or "").strip()
+    filename = safe_filename(str(arguments.get("filename") or "report"))
+
+    if not subject:
+        raise ValueError("subject is required.")
+    if not html_text:
+        raise ValueError("html is required.")
+    if not filename:
+        raise ValueError("filename is required.")
+
+    output_path = output_dir() / f"{filename}_{timestamp()}.pdf"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        body_pdf = tmpdir / "body.pdf"
+        overlay_pdf = tmpdir / "cover_overlay.pdf"
+        build_html_body_pdf(html_text, body_pdf)
+        build_cover_overlay(subject, overlay_pdf)
+        merge_with_template(body_pdf, overlay_pdf, output_path)
+
+    return {
+        "pdf_url": public_report_url(output_path),
+        "download_the_report": public_report_url(output_path),
+        "pdf_path": str(output_path.resolve()),
+        "pdf_exists": output_path.exists(),
+        "pdf_size_bytes": output_path.stat().st_size if output_path.exists() else 0,
+        "template_path": str(TEMPLATE_PATH.resolve()),
+    }
+
+
 def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
     result: Dict[str, Any] = {"content": [{"type": "text", "text": text}], "isError": is_error}
@@ -319,6 +552,24 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         },
         "outputSchema": PDF_OUTPUT_SCHEMA,
         "handler": generate_clarivate_report_pdf,
+    },
+    "generate_clarivate_report_pdf_from_html": {
+        "description": "Generate a Clarivate-template PDF from a subject, HTML report body, and filename.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["subject", "html", "filename"],
+            "properties": {
+                "subject": {"type": "string", "description": "Cover subtitle, usually the searched mark or report subject."},
+                "html": {
+                    "type": "string",
+                    "description": "Completed HTML report body. Supports headings, paragraphs, lists, and simple tables.",
+                },
+                "filename": {"type": "string", "description": "Base report filename without directories. A timestamp is appended."},
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": PDF_OUTPUT_SCHEMA,
+        "handler": generate_clarivate_report_pdf_from_html,
     }
 }
 
@@ -517,14 +768,29 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
 
 
 def self_test() -> int:
-    result = generate_clarivate_report_pdf(
+    markdown_result = generate_clarivate_report_pdf(
         {
             "subject": "EXAMPLE",
             "markdown": "# Example Report\n\nThis is a simplified PDF tool test.",
             "filename": "example_report",
         }
     )
-    print(json.dumps({"tools": list(TOOLS.keys()), "result": result}, indent=2))
+    html_result = generate_clarivate_report_pdf_from_html(
+        {
+            "subject": "POWER BULA",
+            "html": (
+                "<style>.section{font-family:Arial}</style>"
+                "<div class='section'><h2>1. Search Criteria</h2><table class='kv'>"
+                "<tr><td>Mark searched</td><td>Power Bula</td></tr>"
+                "<tr><td>Type</td><td>Word</td></tr>"
+                "<tr><td>Territories covered</td><td>Philippines (PH)</td></tr>"
+                "<tr><td>Nice classes</td><td>3</td></tr>"
+                "</table></div>"
+            ),
+            "filename": "html_report",
+        }
+    )
+    print(json.dumps({"tools": list(TOOLS.keys()), "markdown_result": markdown_result, "html_result": html_result}, indent=2))
     return 0
 
 
