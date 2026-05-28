@@ -48,6 +48,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 SERVER_NAME = "simple-clarivate-pdf-tool"
 SERVER_VERSION = "0.1.0"
 SESSION_ID = str(uuid.uuid4())
+MCP_POST_PATHS = {"/", "/mcp", "/mcp/mcp"}
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "assets" / "Clarivate_template.pdf"
@@ -478,7 +479,8 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/mcp":
+        request_path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if request_path not in MCP_POST_PATHS:
             self._write_json(404, {"error": "not found"})
             return
 
