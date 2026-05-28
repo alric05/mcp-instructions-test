@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal Render-ready HTTP MCP server for one PDF-generation tool.
+"""Minimal Render-ready Streamable HTTP MCP server for one PDF tool.
 
 Deploy this with:
   - this file
@@ -9,31 +9,31 @@ Deploy this with:
 Render start command:
   python3 simple_pdf_tool_render_server_example.py --host 0.0.0.0 --port $PORT
 
-Optional env vars:
+Environment variables:
   REPORT_OUTPUT_DIR=/tmp/reports
   PUBLIC_BASE_URL=https://your-render-service.onrender.com
 
-The server exposes:
-  POST /mcp          JSON-RPC MCP endpoint
-  GET  /health       health check
-  GET  /reports/...  generated PDFs
+Endpoints:
+  /mcp          Streamable HTTP MCP endpoint, handled by the official MCP SDK
+  /health       Health check
+  /reports/...  Generated PDFs
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
-import json
 import mimetypes
 import os
 import re
-import sys
 import tempfile
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
+import uvicorn
+from mcp.server.fastmcp import FastMCP
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
@@ -42,10 +42,15 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.routing import Mount, Route
 
 
 SERVER_NAME = "simple-clarivate-pdf-tool-render-example"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "assets" / "Clarivate_template.pdf"
@@ -91,7 +96,7 @@ def safe_filename(value: str) -> str:
 
 
 def timestamp() -> str:
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def inline_markup(text: str) -> str:
@@ -234,10 +239,18 @@ def merge_with_template(body_path: Path, overlay_path: Path, output_path: Path) 
         writer.write(handle)
 
 
-def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    subject = clean_text(arguments.get("subject"))
-    markdown = str(arguments.get("markdown") or "").strip()
-    filename = safe_filename(str(arguments.get("filename") or "report"))
+mcp = FastMCP(SERVER_NAME, stateless_http=True, json_response=True)
+
+
+@mcp.tool(
+    name="generate_clarivate_report_pdf",
+    description="Generate a Clarivate-template PDF from a subject, markdown report body, and filename.",
+)
+def generate_clarivate_report_pdf(subject: str, markdown: str, filename: str) -> Dict[str, Any]:
+    """Generate a PDF and return a public link to the generated file."""
+    subject = clean_text(subject)
+    markdown = str(markdown or "").strip()
+    filename = safe_filename(filename)
 
     if not subject:
         raise ValueError("subject is required.")
@@ -255,227 +268,93 @@ def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
         build_cover_overlay(subject, overlay_pdf)
         merge_with_template(body_pdf, overlay_pdf, output_path)
 
+    pdf_url = public_report_url(output_path)
     return {
-        "pdf_url": public_report_url(output_path),
-        "download_the_report": public_report_url(output_path),
+        "pdf_url": pdf_url,
+        "download_the_report": pdf_url,
         "pdf_path": str(output_path.resolve()),
         "pdf_exists": output_path.exists(),
         "pdf_size_bytes": output_path.stat().st_size if output_path.exists() else 0,
     }
 
 
-def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
-    text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
-    result: Dict[str, Any] = {"content": [{"type": "text", "text": text}], "isError": is_error}
-    if not is_error and isinstance(payload, dict):
-        result["structuredContent"] = payload
-    return result
-
-
-def json_rpc_result(message_id: Any, result: Any) -> Dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": message_id, "result": result}
-
-
-def json_rpc_error(message_id: Any, code: int, message: str, data: Any = None) -> Dict[str, Any]:
-    error: Dict[str, Any] = {"code": code, "message": message}
-    if data is not None:
-        error["data"] = data
-    return {"jsonrpc": "2.0", "id": message_id, "error": error}
-
-
-TOOLS: Dict[str, Dict[str, Any]] = {
-    "generate_clarivate_report_pdf": {
-        "description": "Generate a Clarivate-template PDF from a subject, markdown report body, and filename.",
-        "inputSchema": {
-            "type": "object",
-            "required": ["subject", "markdown", "filename"],
-            "properties": {
-                "subject": {"type": "string", "description": "Cover subtitle, usually the searched mark or report subject."},
-                "markdown": {"type": "string", "description": "Completed markdown report body."},
-                "filename": {"type": "string", "description": "Base report filename without directories. A timestamp is appended."},
-            },
-            "additionalProperties": False,
-        },
-        "outputSchema": {
-            "type": "object",
-            "required": ["pdf_url", "download_the_report", "pdf_path", "pdf_exists", "pdf_size_bytes"],
-            "properties": {
-                "pdf_url": {"type": ["string", "null"]},
-                "download_the_report": {"type": ["string", "null"]},
-                "pdf_path": {"type": "string"},
-                "pdf_exists": {"type": "boolean"},
-                "pdf_size_bytes": {"type": "integer"},
-            },
-            "additionalProperties": False,
-        },
-        "handler": generate_clarivate_report_pdf,
-    }
-}
-
-
-def handle_initialize(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    protocol = params.get("protocolVersion") or "2024-11-05"
-    return json_rpc_result(
-        message_id,
+async def root(_: Request) -> JSONResponse:
+    return JSONResponse(
         {
-            "protocolVersion": protocol,
-            "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-        },
+            "name": SERVER_NAME,
+            "version": SERVER_VERSION,
+            "mcp_endpoint": "/mcp",
+            "reports_endpoint": "/reports",
+        }
     )
 
 
-def handle_tools_list(message_id: Any) -> Dict[str, Any]:
-    return json_rpc_result(
-        message_id,
-        {
-            "tools": [
-                {
-                    "name": name,
-                    "description": spec["description"],
-                    "inputSchema": spec["inputSchema"],
-                    "outputSchema": spec["outputSchema"],
-                }
-                for name, spec in TOOLS.items()
-            ]
-        },
-    )
+async def health(_: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "name": SERVER_NAME, "version": SERVER_VERSION})
 
 
-def handle_tools_call(message_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
-    name = params.get("name")
-    arguments = params.get("arguments") or {}
-    if name not in TOOLS:
-        return json_rpc_error(message_id, -32602, f"Unknown tool: {name}")
-    if not isinstance(arguments, dict):
-        return json_rpc_error(message_id, -32602, "Tool arguments must be an object.")
+async def report_file(request: Request) -> Response:
+    relative = request.path_params["path"]
+    if not relative or ".." in relative.split("/"):
+        return JSONResponse({"error": "invalid report path"}, status_code=400)
+
+    file_path = (output_dir() / relative).resolve()
     try:
-        handler: Callable[[Dict[str, Any]], Dict[str, Any]] = TOOLS[name]["handler"]
-        return json_rpc_result(message_id, text_result(handler(arguments)))
-    except Exception as exc:
-        return json_rpc_result(message_id, text_result({"tool": name, "error": str(exc)}, is_error=True))
+        file_path.relative_to(output_dir())
+    except ValueError:
+        return JSONResponse({"error": "invalid report path"}, status_code=400)
+    if not file_path.exists() or not file_path.is_file():
+        return JSONResponse({"error": "report not found"}, status_code=404)
+
+    media_type = mimetypes.guess_type(str(file_path))[0] or "application/pdf"
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        filename=file_path.name,
+        headers={"Content-Disposition": f'inline; filename="{file_path.name}"'},
+    )
 
 
-def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    method = message.get("method")
-    message_id = message.get("id")
-    params = message.get("params") or {}
-    if message_id is None and str(method).startswith("notifications/"):
-        return None
-    if method == "initialize":
-        return handle_initialize(message_id, params)
-    if method == "ping":
-        return json_rpc_result(message_id, {})
-    if method == "tools/list":
-        return handle_tools_list(message_id)
-    if method == "tools/call":
-        return handle_tools_call(message_id, params)
-    return json_rpc_error(message_id, -32601, f"Method not found: {method}")
+@contextlib.asynccontextmanager
+async def lifespan(_: Starlette):
+    async with mcp.session_manager.run():
+        yield
 
 
-class MCPHandler(BaseHTTPRequestHandler):
-    server_version = f"{SERVER_NAME}/{SERVER_VERSION}"
+starlette_app = Starlette(
+    routes=[
+        Route("/", root, methods=["GET"]),
+        Route("/health", health, methods=["GET"]),
+        Route("/reports/{path:path}", report_file, methods=["GET"]),
+        Mount("/", app=mcp.streamable_http_app()),
+    ],
+    lifespan=lifespan,
+)
 
-    def _send_json(self, status: int, payload: Any) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "authorization, content-type, mcp-protocol-version, mcp-session-id")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_OPTIONS(self) -> None:  # noqa: N802
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "authorization, content-type, mcp-protocol-version, mcp-session-id")
-        self.end_headers()
-
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
-            self._send_json(200, {"ok": True, "name": SERVER_NAME})
-            return
-        if self.path == "/" or self.path == "":
-            self._send_json(200, {"name": SERVER_NAME, "mcp_endpoint": "/mcp", "reports_endpoint": "/reports"})
-            return
-        if self.path.startswith("/reports/"):
-            self._serve_report()
-            return
-        self._send_json(404, {"error": "not found"})
-
-    def _serve_report(self) -> None:
-        relative = self.path.split("?", 1)[0][len("/reports/") :]
-        if not relative or ".." in relative.split("/"):
-            self._send_json(400, {"error": "invalid report path"})
-            return
-
-        file_path = (output_dir() / relative).resolve()
-        try:
-            file_path.relative_to(output_dir())
-        except ValueError:
-            self._send_json(400, {"error": "invalid report path"})
-            return
-        if not file_path.exists() or not file_path.is_file():
-            self._send_json(404, {"error": "report not found"})
-            return
-
-        content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(file_path.stat().st_size))
-        self.send_header("Content-Disposition", f'inline; filename="{file_path.name}"')
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        with file_path.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 64)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-
-    def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/mcp":
-            self._send_json(404, {"error": "not found"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length") or "0")
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-        except Exception as exc:
-            self._send_json(400, json_rpc_error(None, -32700, "Parse error", str(exc)))
-            return
-        if isinstance(payload, list):
-            responses = [response for item in payload if (response := handle_request(item)) is not None]
-            self._send_json(200, responses)
-            return
-        if isinstance(payload, dict):
-            self._send_json(200, handle_request(payload))
-            return
-        self._send_json(400, json_rpc_error(None, -32600, "Invalid Request"))
+app = CORSMiddleware(
+    starlette_app,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["Mcp-Session-Id"],
+)
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a minimal Render-ready one-tool MCP server.")
+    parser = argparse.ArgumentParser(description="Run a minimal Render-ready Streamable HTTP MCP server.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(argv or sys.argv[1:])
+    args = parse_args(argv or [])
     output_dir().mkdir(parents=True, exist_ok=True)
-    httpd = ThreadingHTTPServer((args.host, args.port), MCPHandler)
-    print(f"{SERVER_NAME} listening on http://{args.host}:{args.port}/mcp", file=sys.stderr)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.server_close()
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import sys
+
+    raise SystemExit(main(sys.argv[1:]))

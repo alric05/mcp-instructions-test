@@ -1,0 +1,24 @@
+swagger: '2.0'
+info:
+  title: Simple PDF MCP Server
+  description: Streamable HTTP MCP server that generates a Clarivate-template PDF and returns a public report link.
+  version: 1.0.0
+host: mcp-instructions-test.onrender.com
+basePath: /
+schemes:
+  - https
+paths:
+  /mcp:
+    post:
+      summary: Simple PDF MCP endpoint
+      description: Invoke the MCP Streamable HTTP endpoint.
+      operationId: InvokeMCP
+      x-ms-agentic-protocol: mcp-streamable-1.0
+      consumes:
+        - application/json
+      produces:
+        - application/json
+        - text/event-stream
+      responses:
+        '200':
+          description: Success
