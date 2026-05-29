@@ -87,6 +87,8 @@ ALLOWED_TAGS = {
     "br",
     "a",
 }
+LINK_RE = re.compile(r"\[([^\]]+)]\(([^)\s]+)\)")
+TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 RISK_COLORS = {
     "low": "#1F6F43",
     "medium": "#8A5A00",
@@ -310,6 +312,174 @@ def build_styles() -> Dict[str, ParagraphStyle]:
             spaceBefore=6,
         ),
     }
+
+
+def markdown_inline_to_html(text: str) -> str:
+    def format_segment(segment: str) -> str:
+        escaped = html.escape(segment)
+        escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+        escaped = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", escaped)
+        return escaped
+
+    parts: List[str] = []
+    last = 0
+    for match in LINK_RE.finditer(text):
+        parts.append(format_segment(text[last : match.start()]))
+        label = format_segment(match.group(1))
+        href = match.group(2).strip()
+        if is_safe_href(href):
+            parts.append(f'<a href="{html.escape(href, quote=True)}">{label}</a>')
+        else:
+            parts.append(label)
+        last = match.end()
+    parts.append(format_segment(text[last:]))
+    return "".join(parts)
+
+
+def is_markdown_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return "|" in stripped and not TABLE_SEPARATOR_RE.match(stripped)
+
+
+def is_markdown_table_separator(line: str) -> bool:
+    return bool(TABLE_SEPARATOR_RE.match(line.strip()))
+
+
+def parse_markdown_table_row(line: str) -> List[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def markdown_table_to_html(header: List[str], rows: List[List[str]]) -> str:
+    max_cols = max([len(header)] + [len(row) for row in rows])
+    normalized_header = header + [""] * (max_cols - len(header))
+    normalized_rows = [row + [""] * (max_cols - len(row)) for row in rows]
+
+    table_type = "kv" if max_cols == 2 else "data"
+    output = [f'<table data-table="{table_type}">']
+    if table_type == "kv":
+        header_pair = [clean_text(value).lower() for value in normalized_header[:2]]
+        skip_header = header_pair[0] in {"field", "key", "label", "item", "criteria"} and header_pair[1] in {
+            "value",
+            "details",
+            "description",
+        }
+        kv_rows = normalized_rows if skip_header else [normalized_header] + normalized_rows
+        output.append("<tbody>")
+        for row in kv_rows:
+            output.append(
+                "<tr>"
+                f"<th>{markdown_inline_to_html(row[0])}</th>"
+                f"<td>{markdown_inline_to_html(row[1])}</td>"
+                "</tr>"
+            )
+        output.append("</tbody>")
+    else:
+        output.append("<thead><tr>")
+        for cell in normalized_header:
+            output.append(f"<th>{markdown_inline_to_html(cell)}</th>")
+        output.append("</tr></thead><tbody>")
+        for row in normalized_rows:
+            output.append("<tr>")
+            for cell in row:
+                output.append(f"<td>{markdown_inline_to_html(cell)}</td>")
+            output.append("</tr>")
+        output.append("</tbody>")
+    output.append("</table>")
+    return "".join(output)
+
+
+def markdown_to_html_fragment(markdown_text: str) -> str:
+    lines = markdown_text.splitlines()
+    output: List[str] = []
+    paragraph: List[str] = []
+    list_type: Optional[str] = None
+    in_section = False
+    index = 0
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            output.append(f"<p>{markdown_inline_to_html(' '.join(paragraph))}</p>")
+            paragraph = []
+
+    def close_list() -> None:
+        nonlocal list_type
+        if list_type:
+            output.append(f"</{list_type}>")
+            list_type = None
+
+    def close_section() -> None:
+        nonlocal in_section
+        if in_section:
+            output.append("</section>")
+            in_section = False
+
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            flush_paragraph()
+            close_list()
+            index += 1
+            continue
+
+        if index + 1 < len(lines) and is_markdown_table_row(line) and is_markdown_table_separator(lines[index + 1]):
+            flush_paragraph()
+            close_list()
+            header = parse_markdown_table_row(line)
+            index += 2
+            rows: List[List[str]] = []
+            while index < len(lines) and is_markdown_table_row(lines[index].strip()):
+                rows.append(parse_markdown_table_row(lines[index]))
+                index += 1
+            output.append(markdown_table_to_html(header, rows))
+            continue
+
+        heading = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if heading:
+            flush_paragraph()
+            close_list()
+            level = len(heading.group(1))
+            content = markdown_inline_to_html(heading.group(2).strip())
+            if level == 1:
+                close_section()
+                output.append(f"<h1>{content}</h1>")
+            elif level == 2:
+                close_section()
+                output.append(f"<section><h2>{content}</h2>")
+                in_section = True
+            else:
+                output.append(f"<h3>{content}</h3>")
+            index += 1
+            continue
+
+        unordered = re.match(r"^[-*]\s+(.+)$", line)
+        ordered = re.match(r"^\d+[.)]\s+(.+)$", line)
+        if unordered or ordered:
+            flush_paragraph()
+            next_type = "ul" if unordered else "ol"
+            if list_type != next_type:
+                close_list()
+                output.append(f"<{next_type}>")
+                list_type = next_type
+            item = unordered.group(1) if unordered else ordered.group(1)
+            output.append(f"<li>{markdown_inline_to_html(item.strip())}</li>")
+            index += 1
+            continue
+
+        close_list()
+        paragraph.append(line)
+        index += 1
+
+    flush_paragraph()
+    close_list()
+    close_section()
+    return "".join(output)
+
 
 class HTMLFragmentSanitizer(HTMLParser):
     """Sanitize the agent's body fragment to a strict, report-safe subset."""
@@ -677,14 +847,16 @@ def merge_with_template(body_path: Path, overlay_path: Path, output_path: Path) 
 def build_report_pdf(
     document_title: str,
     file_name: str,
-    html_fragment: str,
+    html_fragment: str = "",
+    markdown: str = "",
 ) -> Dict[str, Any]:
     output_path = output_dir() / f"{file_name}_{timestamp()}.pdf"
+    report_fragment = html_fragment.strip() or markdown_to_html_fragment(markdown)
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         body_pdf = tmpdir / "body.pdf"
         overlay_pdf = tmpdir / "cover_overlay.pdf"
-        build_html_body_pdf(html_fragment, document_title, body_pdf)
+        build_html_body_pdf(report_fragment, document_title, body_pdf)
         build_cover_overlay(document_title, overlay_pdf)
         merge_with_template(body_pdf, overlay_pdf, output_path)
 
@@ -700,17 +872,18 @@ def build_report_pdf(
 
 def generate_clarivate_report_pdf(arguments: Dict[str, Any]) -> Dict[str, Any]:
     html_fragment = str(arguments.get("htmlFragment") or "").strip()
+    markdown = str(arguments.get("markdown") or "").strip()
     file_name = safe_report_basename(str(arguments.get("fileName") or "report"))
     document_title = clean_text(arguments.get("documentTitle") or "Clarivate Report")
 
-    if not html_fragment:
-        raise ValueError("htmlFragment is required.")
+    if not html_fragment and not markdown:
+        raise ValueError("htmlFragment or markdown is required.")
     if not file_name:
         raise ValueError("fileName is required.")
     if not document_title:
         raise ValueError("documentTitle is required.")
 
-    return build_report_pdf(document_title, file_name, html_fragment)
+    return build_report_pdf(document_title, file_name, html_fragment=html_fragment, markdown=markdown)
 
 
 def text_result(payload: Any, is_error: bool = False) -> Dict[str, Any]:
@@ -749,14 +922,15 @@ PDF_OUTPUT_SCHEMA = {
 TOOLS: Dict[str, Dict[str, Any]] = {
     "generate_clarivate_report_pdf": {
         "description": (
-            "Generate a Clarivate-template PDF from a compact, semantic HTML body fragment. "
-            "Send report content only: no full HTML document, CSS, inline styles, scripts, or Markdown tables. "
-            "The server sanitizes the fragment, applies fixed sober business-report styling, adds the disclaimer, "
-            "wraps the body, creates the PDF, and returns a downloadable PDF link."
+            "Generate a Clarivate-template PDF from either a compact, semantic HTML body fragment or Markdown. "
+            "Prefer htmlFragment for token-efficient, reliable table styling. Use markdown as a fallback when needed. "
+            "The server sanitizes HTML, converts Markdown to the same internal HTML fragment, applies fixed sober "
+            "business-report styling, adds the disclaimer, creates the PDF, and returns a downloadable PDF link. "
+            "If both htmlFragment and markdown are provided, htmlFragment is used."
         ),
         "inputSchema": {
             "type": "object",
-            "required": ["htmlFragment", "fileName", "documentTitle"],
+            "required": ["fileName", "documentTitle"],
             "properties": {
                 "htmlFragment": {
                     "type": "string",
@@ -767,6 +941,14 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                         "span data-risk='low|medium|high' for risk labels, th/td colspan or rowspan for simple spans, "
                         "optional th scope, and a href with http, https, or mailto links only. Do not include html/head/body/style/script, CSS, "
                         "inline style attributes, event handlers, or Markdown tables."
+                    ),
+                },
+                "markdown": {
+                    "type": "string",
+                    "description": (
+                        "Optional Markdown report body. Use this only when htmlFragment is not supplied. Supports headings, paragraphs, "
+                        "bullet and numbered lists, links, bold/italic text, and simple pipe tables. Markdown is converted server-side "
+                        "to the same sanitized report fragment and styled by the server."
                     ),
                 },
                 "fileName": {
@@ -980,10 +1162,10 @@ class MCPHttpHandler(BaseHTTPRequestHandler):
 
 
 def self_test() -> int:
-    result = generate_clarivate_report_pdf(
+    html_result = generate_clarivate_report_pdf(
         {
             "documentTitle": "Trademark Knockout Search Report",
-            "fileName": "trademark-knockout-report.pdf",
+            "fileName": "trademark-knockout-report-html.pdf",
             "htmlFragment": (
                 "<h1>Trademark Knockout Search Report</h1>"
                 "<section><h2>1. Search Criteria</h2><table data-table='kv'><tbody>"
@@ -1003,7 +1185,31 @@ def self_test() -> int:
             ),
         }
     )
-    print(json.dumps({"tools": list(TOOLS.keys()), "result": result}, indent=2))
+    markdown_result = generate_clarivate_report_pdf(
+        {
+            "documentTitle": "Trademark Knockout Search Report",
+            "fileName": "trademark-knockout-report-markdown.pdf",
+            "markdown": (
+                "# Trademark Knockout Search Report\n\n"
+                "## 1. Search Criteria\n\n"
+                "| Field | Value |\n"
+                "| --- | --- |\n"
+                "| Mark searched | POWER BULA |\n"
+                "| Type | Word |\n"
+                "| Territories covered | Philippines (PH), WIPO designations in PH |\n"
+                "| Nice classes | 3 |\n\n"
+                "## 2. Risk Summary\n\n"
+                "| Field | Value |\n"
+                "| --- | --- |\n"
+                "| Exact match found | Yes |\n"
+                "| Initial risk | **High** |\n\n"
+                "## 3. Key Takeaways\n\n"
+                "- Exact or near-identical use was identified in the searched class.\n"
+                "- Proceed with caution and obtain legal review before filing.\n"
+            ),
+        }
+    )
+    print(json.dumps({"tools": list(TOOLS.keys()), "html_result": html_result, "markdown_result": markdown_result}, indent=2))
     return 0
 
 
@@ -1011,7 +1217,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a minimal one-tool MCP HTTP server.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
-    parser.add_argument("--self-test", action="store_true", help="Generate one example PDF and exit.")
+    parser.add_argument("--self-test", action="store_true", help="Generate example PDFs for both input routes and exit.")
     return parser.parse_args(argv)
 
 
